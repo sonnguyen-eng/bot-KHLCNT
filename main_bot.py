@@ -10,7 +10,7 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
-# 1. BIẾN MÔI TRƯỜNG & SECRETS (GITHUB ACTIONS)
+# 1. BIẾN MÔI TRƯỜNG & SECRETS
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID")
 SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
@@ -18,6 +18,9 @@ TARGET_TAGS_STR = os.environ.get("TARGET_TAGS")
 
 TARGET_TAGS = TARGET_TAGS_STR.split(",") if TARGET_TAGS_STR else []
 ALLOWED_EXTENSIONS = ('.pdf', '.docx', '.xlsx', '.xls', '.png', '.jpg', '.jpeg')
+
+# Danh sách Model dự phòng khi gặp lỗi 429 Quota Exhausted
+FALLBACK_MODELS = ['gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-1.5-flash']
 
 # 2. KHỞI TẠO CLIENTS VÀ KIỂM TRA AN TOÀN
 if not GEMINI_API_KEY:
@@ -69,22 +72,28 @@ def is_matching_tags(file_name, folder_path_str):
             return True
     return False
 
-def generate_content_with_retry(uploaded_file, prompt, max_retries=3):
-    for attempt in range(max_retries):
-        try:
-            response = client.models.generate_content(
-                model='gemini-3.8-flash',
-                contents=[uploaded_file, prompt],
-                config=types.GenerateContentConfig(response_mime_type="application/json")
-            )
-            return response
-        except Exception as e:
-            if attempt < max_retries - 1:
-                wait_time = (attempt + 1) * 10
-                print(f"⚠️ Server quá tải/giới hạn quota ({e}). Thử lại lần {attempt + 1}/{max_retries} sau {wait_time}s...")
-                time.sleep(wait_time)
-            else:
-                raise e
+def generate_content_with_fallback(uploaded_file, prompt):
+    """Thử lần lượt các Model dự phòng khi gặp lỗi 429 Resource Exhausted hoặc 503 Overload"""
+    last_exception = None
+    for model_name in FALLBACK_MODELS:
+        for attempt in range(2):
+            try:
+                print(f"🤖 Đang sử dụng model: {model_name} (Thử lần {attempt + 1})...")
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[uploaded_file, prompt],
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )
+                return response
+            except Exception as e:
+                last_exception = e
+                err_str = str(e)
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "503" in err_str:
+                    print(f"⚠️ Model {model_name} bị đụng trần quota/quá tải. Đang chờ 15 giây...")
+                    time.sleep(15)
+                else:
+                    break
+    raise last_exception
 
 # 3. QUÉT ĐỆ QUY VÀ TRÍCH XUẤT DỮ LIỆU
 def scan_and_process_folder(service, folder_id, current_path=""):
@@ -132,7 +141,6 @@ def scan_and_process_folder(service, folder_id, current_path=""):
             current_file_hash = calculate_md5(file_bytes)
             print(f"🔑 Mã Hash MD5: {current_file_hash}")
 
-            # Đặt tên file tạm thuần ASCII để tránh lỗi mã hóa tên file Tiếng Việt
             ext = os.path.splitext(file_name)[1]
             safe_temp_name = f"temp_upload_{current_file_hash[:8]}{ext}"
             local_file_path = os.path.join(tempfile.gettempdir(), safe_temp_name)
@@ -143,7 +151,7 @@ def scan_and_process_folder(service, folder_id, current_path=""):
             uploaded_file = None
             try:
                 uploaded_file = client.files.upload(file=local_file_path)
-                response = generate_content_with_retry(uploaded_file, PROMPT_KHOA_HOC)
+                response = generate_content_with_fallback(uploaded_file, PROMPT_KHOA_HOC)
                 
                 json_result = json.loads(response.text)
                 json_result["metadata"]["file_hash_md5"] = current_file_hash
@@ -157,7 +165,6 @@ def scan_and_process_folder(service, folder_id, current_path=""):
                     'parents': [folder_id]
                 }
                 
-                # Cấu hình supportsAllDrives=True chính xác tại create()
                 service.files().create(
                     body=file_metadata,
                     media_body=media,
@@ -166,6 +173,9 @@ def scan_and_process_folder(service, folder_id, current_path=""):
                 ).execute()
                 
                 print(f"✅ Đã tạo file JSON thành công: {expected_json_v1}")
+
+                # Nghỉ ngắn giữa các file để giãn tốc độ gọi API
+                time.sleep(10)
 
             except Exception as e:
                 print(f"❌ Lỗi xử lý file {file_name}: {str(e)}")
