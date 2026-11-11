@@ -5,6 +5,11 @@ import hashlib
 import time
 import sys
 import tempfile
+from google import genai
+from google.genai import types
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 # ---------------------------------------------------------
 # 1. TỰ ĐỘNG NHẬN DIỆN MÔI TRƯỜNG (COLAB / GITHUB ACTIONS)
@@ -19,7 +24,8 @@ if IS_COLAB:
         DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID") or userdata.get("DRIVE_FOLDER_ID")
         SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON") or userdata.get("SERVICE_ACCOUNT_JSON")
         TARGET_TAGS_STR = os.environ.get("TARGET_TAGS") or userdata.get("TARGET_TAGS")
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ Không thể đọc từ Colab Secrets (userdata): {e}")
         GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
         DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID")
         SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
@@ -34,13 +40,12 @@ else:
 TARGET_TAGS = TARGET_TAGS_STR.split(",") if TARGET_TAGS_STR else []
 ALLOWED_EXTENSIONS = ('.pdf', '.docx', '.xlsx', '.xls', '.png', '.jpg', '.jpeg')
 
-from google import genai
-from google.genai import types
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+# 2. KHỞI TẠO CLIENTS VỚI KIỂM TRA API KEY AN TOÀN
+if not GEMINI_API_KEY:
+    raise ValueError("❌ LỖI: Chưa cung cấp GEMINI_API_KEY! "
+                     "\n-> Nếu chạy trên Colab: Hãy vào mục Secrets (🔑) bên thanh trái, thêm tên 'GEMINI_API_KEY' và bật công tắc 'Notebook access'."
+                     "\n-> Nếu chạy GitHub Actions: Khai báo 'GEMINI_API_KEY' trong Repository Secrets.")
 
-# 2. KHỞI TẠO CLIENTS SỬ DỤNG GEMINI 3.8 FLASH
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 def get_drive_service():
@@ -150,7 +155,7 @@ def scan_and_process_folder(service, folder_id, current_path=""):
             current_file_hash = calculate_md5(file_bytes)
             print(f"🔑 Mã Hash MD5: {current_file_hash}")
 
-            # Đặt tên file tạm thuần ASCII tránh lỗi encoding trên Google Colab
+            # Đặt tên file tạm thuần ASCII tránh lỗi encoding tên Tiếng Việt trên Google Colab
             ext = os.path.splitext(file_name)[1]
             safe_temp_name = f"temp_upload_{current_file_hash[:8]}{ext}"
             local_file_path = os.path.join(tempfile.gettempdir(), safe_temp_name)
