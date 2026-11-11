@@ -1,9 +1,8 @@
 import os
 import json
 import io
-import hashlib
 import time
-import tempfile
+import hashlib
 from google import genai
 from google.genai import types
 from google.oauth2.service_account import Credentials
@@ -14,23 +13,15 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID")
 SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
-TARGET_TAGS_STR = os.environ.get("TARGET_TAGS")
+TARGET_TAGS = os.environ.get("TARGET_TAGS", "").split(",") if os.environ.get("TARGET_TAGS") else []
 
-TARGET_TAGS = TARGET_TAGS_STR.split(",") if TARGET_TAGS_STR else []
 ALLOWED_EXTENSIONS = ('.pdf', '.docx', '.xlsx', '.xls', '.png', '.jpg', '.jpeg')
+PRIMARY_MODEL = "gemini-2.5-flash"  # Model chuẩn khả dụng trên SDK Google GenAI v1
 
-# Danh sách Model dự phòng khi gặp lỗi 429 Quota Exhausted
-FALLBACK_MODELS = ['gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-1.5-flash']
-
-# 2. KHỞI TẠO CLIENTS VÀ KIỂM TRA AN TOÀN
-if not GEMINI_API_KEY:
-    raise ValueError("❌ LỖI: Chưa khai báo GEMINI_API_KEY trong Repository Secrets!")
-
+# 2. KHỞI TẠO CLIENTS
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 def get_drive_service():
-    if not SERVICE_ACCOUNT_JSON:
-        raise ValueError("❌ LỖI: Chưa khai báo SERVICE_ACCOUNT_JSON trong Repository Secrets!")
     info = json.loads(SERVICE_ACCOUNT_JSON)
     creds = Credentials.from_service_account_info(
         info, scopes=['https://www.googleapis.com/auth/drive']
@@ -72,28 +63,28 @@ def is_matching_tags(file_name, folder_path_str):
             return True
     return False
 
-def generate_content_with_fallback(uploaded_file, prompt):
-    """Thử lần lượt các Model dự phòng khi gặp lỗi 429 Resource Exhausted hoặc 503 Overload"""
-    last_exception = None
-    for model_name in FALLBACK_MODELS:
-        for attempt in range(2):
-            try:
-                print(f"🤖 Đang sử dụng model: {model_name} (Thử lần {attempt + 1})...")
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=[uploaded_file, prompt],
-                    config=types.GenerateContentConfig(response_mime_type="application/json")
-                )
-                return response
-            except Exception as e:
-                last_exception = e
-                err_str = str(e)
-                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "503" in err_str:
-                    print(f"⚠️ Model {model_name} bị đụng trần quota/quá tải. Đang chờ 15 giây...")
-                    time.sleep(15)
-                else:
-                    break
-    raise last_exception
+def call_gemini_with_retry(uploaded_file, prompt, max_retries=5):
+    """Gửi request tới Gemini API với cơ chế Retry khi chạm trần Quota"""
+    backoff_delays = [15, 30, 45, 60, 90]
+    
+    for attempt in range(max_retries):
+        try:
+            print(f"🤖 Đang gọi Gemini ({PRIMARY_MODEL}) - Thử lần {attempt + 1}/{max_retries}...")
+            response = client.models.generate_content(
+                model=PRIMARY_MODEL,
+                contents=[uploaded_file, prompt],
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            return response
+        except Exception as e:
+            error_msg = str(e)
+            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg or "quota" in error_msg.lower():
+                wait_time = backoff_delays[min(attempt, len(backoff_delays) - 1)]
+                print(f"⚠️ Chạm giới hạn Quota/Rate Limit. Tạm dừng {wait_time} giây trước khi thử lại...")
+                time.sleep(wait_time)
+            else:
+                raise e
+    raise RuntimeError(f"❌ Thất bại sau {max_retries} lần thử do vượt trần Quota API.")
 
 # 3. QUÉT ĐỆ QUY VÀ TRÍCH XUẤT DỮ LIỆU
 def scan_and_process_folder(service, folder_id, current_path=""):
@@ -141,17 +132,16 @@ def scan_and_process_folder(service, folder_id, current_path=""):
             current_file_hash = calculate_md5(file_bytes)
             print(f"🔑 Mã Hash MD5: {current_file_hash}")
 
-            ext = os.path.splitext(file_name)[1]
-            safe_temp_name = f"temp_upload_{current_file_hash[:8]}{ext}"
-            local_file_path = os.path.join(tempfile.gettempdir(), safe_temp_name)
-
+            local_file_path = f"temp_{file_name}"
             with open(local_file_path, 'wb') as f:
                 f.write(file_bytes)
 
-            uploaded_file = None
             try:
                 uploaded_file = client.files.upload(file=local_file_path)
-                response = generate_content_with_fallback(uploaded_file, PROMPT_KHOA_HOC)
+                
+                response = call_gemini_with_retry(uploaded_file, PROMPT_KHOA_HOC)
+                
+                client.files.delete(name=uploaded_file.name)
                 
                 json_result = json.loads(response.text)
                 json_result["metadata"]["file_hash_md5"] = current_file_hash
@@ -174,17 +164,14 @@ def scan_and_process_folder(service, folder_id, current_path=""):
                 
                 print(f"✅ Đã tạo file JSON thành công: {expected_json_v1}")
 
-                # Nghỉ ngắn giữa các file để giãn tốc độ gọi API
-                time.sleep(10)
+                if os.path.exists(local_file_path):
+                    os.remove(local_file_path)
+
+                # Nghỉ ngắn giữa các file để tránh đụng trần Rate Limit liên tục
+                time.sleep(3)
 
             except Exception as e:
                 print(f"❌ Lỗi xử lý file {file_name}: {str(e)}")
-            finally:
-                if uploaded_file:
-                    try:
-                        client.files.delete(name=uploaded_file.name)
-                    except Exception:
-                        pass
                 if os.path.exists(local_file_path):
                     os.remove(local_file_path)
 
