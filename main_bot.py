@@ -5,7 +5,6 @@ import hashlib
 import time
 import sys
 import tempfile
-import urllib.parse
 
 # ---------------------------------------------------------
 # 1. TỰ ĐỘNG NHẬN DIỆN MÔI TRƯỜNG (COLAB / GITHUB ACTIONS)
@@ -41,7 +40,7 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
-# 2. KHỞI TẠO CLIENTS SỬ DỤNG GEMINI 3.8 FLASH CỦA SDK MỚI (google-genai)
+# 2. KHỞI TẠO CLIENTS SỬ DỤNG GEMINI 3.8 FLASH
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 def get_drive_service():
@@ -151,7 +150,7 @@ def scan_and_process_folder(service, folder_id, current_path=""):
             current_file_hash = calculate_md5(file_bytes)
             print(f"🔑 Mã Hash MD5: {current_file_hash}")
 
-            # Đặt tên file tạm thuần ASCII để tránh lỗi Unicode Encoding trên Google Colab API client
+            # Đặt tên file tạm thuần ASCII tránh lỗi encoding trên Google Colab
             ext = os.path.splitext(file_name)[1]
             safe_temp_name = f"temp_upload_{current_file_hash[:8]}{ext}"
             local_file_path = os.path.join(tempfile.gettempdir(), safe_temp_name)
@@ -176,6 +175,7 @@ def scan_and_process_folder(service, folder_id, current_path=""):
                     'parents': [folder_id]
                 }
                 
+                # Cấu hình supportsAllDrives=True chính xác tại create()
                 service.files().create(
                     body=file_metadata,
                     media_body=media,
