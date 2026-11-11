@@ -132,7 +132,7 @@ def scan_and_process_folder(service, folder_id, current_path=""):
             current_file_hash = calculate_md5(file_bytes)
             print(f"🔑 Mã Hash MD5: {current_file_hash}")
 
-            # Đặt tên file tạm thuần ASCII để tránh lỗi ký tự Unicode tên Tiếng Việt
+            # Đặt tên file tạm thuần ASCII để tránh lỗi mã hóa tên file Tiếng Việt
             ext = os.path.splitext(file_name)[1]
             safe_temp_name = f"temp_upload_{current_file_hash[:8]}{ext}"
             local_file_path = os.path.join(tempfile.gettempdir(), safe_temp_name)
@@ -157,7 +157,7 @@ def scan_and_process_folder(service, folder_id, current_path=""):
                     'parents': [folder_id]
                 }
                 
-                # Cấu hình supportsAllDrives=True chính xác tại create() để tránh lỗi 403 / unexpected keyword
+                # Cấu hình supportsAllDrives=True chính xác tại create()
                 service.files().create(
                     body=file_metadata,
                     media_body=media,
