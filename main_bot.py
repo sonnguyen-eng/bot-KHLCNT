@@ -4,14 +4,19 @@ import io
 import hashlib
 import time
 import sys
+from google import genai
+from google.genai import types
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 # ---------------------------------------------------------
-# 0. TỰ ĐỘNG XỬ LÝ MÔI TRƯỜNG (GOOGLE COLAB / GITHUB ACTIONS)
+# 1. TỰ ĐỘNG NHẬN DIỆN MÔI TRƯỜNG (COLAB / GITHUB ACTIONS)
 # ---------------------------------------------------------
 IS_COLAB = 'google.colab' in sys.modules
 
 if IS_COLAB:
-    print("⚡ Đang chạy trên môi trường Google Colab")
+    print("⚡ Môi trường: Google Colab")
     try:
         from google.colab import userdata
         GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or userdata.get("GEMINI_API_KEY")
@@ -24,7 +29,7 @@ if IS_COLAB:
         SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
         TARGET_TAGS_STR = os.environ.get("TARGET_TAGS")
 else:
-    print("🖥️ Đang chạy trên môi trường GitHub Actions / Local Python")
+    print("🖥️ Môi trường: GitHub Actions / Local Python")
     GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
     DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID")
     SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
@@ -33,18 +38,12 @@ else:
 TARGET_TAGS = TARGET_TAGS_STR.split(",") if TARGET_TAGS_STR else []
 ALLOWED_EXTENSIONS = ('.pdf', '.docx', '.xlsx', '.xls', '.png', '.jpg', '.jpeg')
 
-from google import genai
-from google.genai import types
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
-
-# 1. KHỞI TẠO CLIENTS
+# 2. KHỞI TẠO CLIENTS SỬ DỤNG GEMINI 2.5 FLASH CỦA SDK MỚI (google-genai)
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 def get_drive_service():
     if not SERVICE_ACCOUNT_JSON:
-        raise ValueError("Thiếu cấu hình SERVICE_ACCOUNT_JSON trong biến môi trường hoặc Colab Secrets!")
+        raise ValueError("❌ Thiếu cấu hình SERVICE_ACCOUNT_JSON trong Secrets / Biến môi trường!")
     info = json.loads(SERVICE_ACCOUNT_JSON)
     creds = Credentials.from_service_account_info(
         info, scopes=['https://www.googleapis.com/auth/drive']
@@ -90,7 +89,7 @@ def generate_content_with_retry(uploaded_file, prompt, max_retries=3):
     for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
-                model='gemini-3.8-flash',
+                model='gemini-2.5-flash',
                 contents=[uploaded_file, prompt],
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )
@@ -103,7 +102,7 @@ def generate_content_with_retry(uploaded_file, prompt, max_retries=3):
             else:
                 raise e
 
-# 2. QUÉT ĐỆ QUY VÀ TRÍCH XUẤT DỮ LIỆU
+# 3. QUÉT ĐỆ QUY VÀ TRÍCH XUẤT DỮ LIỆU
 def scan_and_process_folder(service, folder_id, current_path=""):
     query = f"'{folder_id}' in parents and trashed = false"
     results = service.files().list(
@@ -170,6 +169,7 @@ def scan_and_process_folder(service, folder_id, current_path=""):
                     'parents': [folder_id]
                 }
                 
+                # Cấu hình chính xác supportsAllDrives=True tại vị trí hàm create()
                 service.files().create(
                     body=file_metadata,
                     media_body=media,
