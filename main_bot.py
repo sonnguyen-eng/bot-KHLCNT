@@ -3,7 +3,6 @@ import json
 import io
 import hashlib
 import time
-import sys
 import tempfile
 from google import genai
 from google.genai import types
@@ -11,46 +10,24 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
-# ---------------------------------------------------------
-# 1. TỰ ĐỘNG NHẬN DIỆN MÔI TRƯỜNG (COLAB / GITHUB ACTIONS)
-# ---------------------------------------------------------
-IS_COLAB = 'google.colab' in sys.modules
-
-def get_config_var(var_name):
-    """Lấy biến cấu hình an toàn, tương thích độc lập cả Colab Secrets lẫn GitHub Actions"""
-    val = os.environ.get(var_name)
-    if not val and IS_COLAB:
-        try:
-            from google.colab import userdata
-            val = userdata.get(var_name)
-        except Exception:
-            val = None
-    return val
-
-if IS_COLAB:
-    print("⚡ Môi trường: Google Colab")
-else:
-    print("🖥️ Môi trường: GitHub Actions / Local Python")
-
-GEMINI_API_KEY = get_config_var("GEMINI_API_KEY")
-DRIVE_FOLDER_ID = get_config_var("DRIVE_FOLDER_ID")
-SERVICE_ACCOUNT_JSON = get_config_var("SERVICE_ACCOUNT_JSON")
-TARGET_TAGS_STR = get_config_var("TARGET_TAGS")
+# 1. BIẾN MÔI TRƯỜNG & SECRETS (GITHUB ACTIONS)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID")
+SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
+TARGET_TAGS_STR = os.environ.get("TARGET_TAGS")
 
 TARGET_TAGS = TARGET_TAGS_STR.split(",") if TARGET_TAGS_STR else []
 ALLOWED_EXTENSIONS = ('.pdf', '.docx', '.xlsx', '.xls', '.png', '.jpg', '.jpeg')
 
-# 2. KHỞI TẠO CLIENTS SỬ DỤNG GEMINI 3.8 FLASH CỦA SDK MỚI (google-genai)
+# 2. KHỞI TẠO CLIENTS VÀ KIỂM TRA AN TOÀN
 if not GEMINI_API_KEY:
-    raise ValueError("❌ LỖI: Chưa cung cấp GEMINI_API_KEY!\n"
-                     "-> Trên Colab: Thêm Secret tên 'GEMINI_API_KEY' và bật 'Notebook access'.\n"
-                     "-> Trên GitHub: Thêm Secret 'GEMINI_API_KEY' trong Repository Secrets.")
+    raise ValueError("❌ LỖI: Chưa khai báo GEMINI_API_KEY trong Repository Secrets!")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 def get_drive_service():
     if not SERVICE_ACCOUNT_JSON:
-        raise ValueError("❌ Thiếu cấu hình SERVICE_ACCOUNT_JSON trong Secrets / Biến môi trường!")
+        raise ValueError("❌ LỖI: Chưa khai báo SERVICE_ACCOUNT_JSON trong Repository Secrets!")
     info = json.loads(SERVICE_ACCOUNT_JSON)
     creds = Credentials.from_service_account_info(
         info, scopes=['https://www.googleapis.com/auth/drive']
@@ -155,7 +132,7 @@ def scan_and_process_folder(service, folder_id, current_path=""):
             current_file_hash = calculate_md5(file_bytes)
             print(f"🔑 Mã Hash MD5: {current_file_hash}")
 
-            # Đặt tên file tạm thuần ASCII tránh lỗi Unicode Encoding tên Tiếng Việt trên Colab
+            # Đặt tên file tạm thuần ASCII để tránh lỗi ký tự Unicode tên Tiếng Việt
             ext = os.path.splitext(file_name)[1]
             safe_temp_name = f"temp_upload_{current_file_hash[:8]}{ext}"
             local_file_path = os.path.join(tempfile.gettempdir(), safe_temp_name)
@@ -180,7 +157,7 @@ def scan_and_process_folder(service, folder_id, current_path=""):
                     'parents': [folder_id]
                 }
                 
-                # Cấu hình supportsAllDrives=True chính xác tại create()
+                # Cấu hình supportsAllDrives=True chính xác tại create() để tránh lỗi 403 / unexpected keyword
                 service.files().create(
                     body=file_metadata,
                     media_body=media,
