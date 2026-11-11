@@ -8,14 +8,19 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
-# 1. LẤY BIẾN MÔI TRƯỜNG TỪ GITHUB SECRETS
+# ==============================================================================
+# 1. LẤY BIẾN MÔI TRƯỜNG BẢO MẬT TỪ GITHUB SECRETS
+# ==============================================================================
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID")
 SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
 
+# Định dạng tài liệu khoa học cho phép xử lý
 ALLOWED_EXTENSIONS = ('.pdf', '.docx', '.xlsx', '.xls', '.png', '.jpg', '.jpeg')
 
-# 2. KHỞI TẠO CLIENTS
+# ==============================================================================
+# 2. KHỞI TẠO CÁC KẾT NỐI API
+# ==============================================================================
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 def get_drive_service():
@@ -25,6 +30,7 @@ def get_drive_service():
     )
     return build('drive', 'v3', credentials=creds)
 
+# Prompt chuẩn hóa trích xuất thông tin khoa học
 PROMPT_KHOA_HOC = """
 Bạn là một trợ lý phân tích dữ liệu khoa học / kỹ thuật chuyên nghiệp.
 Hãy phân tích tài liệu được cung cấp và trích xuất thông tin theo cấu trúc JSON chuẩn sau:
@@ -46,11 +52,15 @@ Hãy phân tích tài liệu được cung cấp và trích xuất thông tin th
 Chỉ trả về JSON hợp lệ, không kèm lời giải thích văn bản.
 """
 
+# ==============================================================================
+# 3. QUÉT THƯ MỤC VÀ XỬ LÝ DỮ LIỆU ĐỆ QUY
+# ==============================================================================
 def scan_and_process_folder(service, folder_id):
     query = f"'{folder_id}' in parents and trashed = false"
     results = service.files().list(q=query, fields="files(id, name, mimeType)").execute()
     items = results.get('files', [])
 
+    # Tập hợp các file JSON đã tồn tại để bỏ qua
     existing_jsons = {f['name'] for f in items if f['name'].endswith('_PROCESSED.json')}
 
     for item in items:
@@ -58,7 +68,7 @@ def scan_and_process_folder(service, folder_id):
         file_name = item['name']
         mime_type = item['mimeType']
 
-        # Nếu là thư mục con -> Quét tiếp đệ quy
+        # Nếu là thư mục con -> Quét đệ quy sâu hơn
         if mime_type == 'application/vnd.google-apps.folder':
             scan_and_process_folder(service, file_id)
 
@@ -73,7 +83,7 @@ def scan_and_process_folder(service, folder_id):
 
             print(f"\n📄 Đang xử lý file mới: {file_name}")
             
-            # Tải file tạm thời về máy chủ GitHub
+            # 1. Tải file tạm về máy chủ ảo GitHub
             request = service.files().get_media(fileId=file_id)
             local_file_path = f"temp_{file_name}"
             with open(local_file_path, 'wb') as f:
@@ -82,28 +92,28 @@ def scan_and_process_folder(service, folder_id):
                 while not done:
                     _, done = downloader.next_chunk()
 
-            # Gửi file sang Gemini API để xử lý
+            # 2. Gửi file sang Gemini API (Cập nhật mô hình gemini-3.8-flash)
             try:
                 uploaded_file = client.files.upload(file=local_file_path)
                 response = client.models.generate_content(
-                    model='gemini-2.5-flash',
+                    model='gemini-3.8-flash',
                     contents=[uploaded_file, PROMPT_KHOA_HOC],
                     config=types.GenerateContentConfig(response_mime_type="application/json")
                 )
                 client.files.delete(name=uploaded_file.name)
                 
-                # Lưu file JSON cục bộ
+                # 3. Lưu file JSON tạm
                 local_json_path = f"{base_name}_PROCESSED.json"
                 with open(local_json_path, 'w', encoding='utf-8') as f:
                     f.write(response.text)
 
-                # Tải file JSON ngược lên Google Drive
+                # 4. Tải file JSON kết quả lên Google Drive
                 file_metadata = {'name': expected_json_name, 'parents': [folder_id]}
                 media = MediaFileUpload(local_json_path, mimetype='application/json')
                 service.files().create(body=file_metadata, media_body=media).execute()
-                print(f"✅ Đã xuất file JSON thành công lên Drive!")
+                print(f"✅ Đã xuất file JSON thành công lên Google Drive!")
 
-                # Dọn dẹp file tạm
+                # 5. Dọn dẹp bộ nhớ tạm
                 if os.path.exists(local_file_path):
                     os.remove(local_file_path)
                 if os.path.exists(local_json_path):
