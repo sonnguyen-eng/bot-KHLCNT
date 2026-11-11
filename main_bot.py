@@ -6,7 +6,7 @@ from google import genai
 from google.genai import types
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 # ==============================================================================
 # 1. LẤY BIẾN MÔI TRƯỜNG BẢO MẬT TỪ GITHUB SECRETS
@@ -57,7 +57,12 @@ Chỉ trả về JSON hợp lệ, không kèm lời giải thích văn bản.
 # ==============================================================================
 def scan_and_process_folder(service, folder_id):
     query = f"'{folder_id}' in parents and trashed = false"
-    results = service.files().list(q=query, fields="files(id, name, mimeType)").execute()
+    results = service.files().list(
+        q=query, 
+        fields="files(id, name, mimeType)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True
+    ).execute()
     items = results.get('files', [])
 
     # Tập hợp các file JSON đã tồn tại để bỏ qua
@@ -92,7 +97,7 @@ def scan_and_process_folder(service, folder_id):
                 while not done:
                     _, done = downloader.next_chunk()
 
-            # 2. Gửi file sang Gemini API (Cập nhật mô hình gemini-3.8-flash)
+            # 2. Gửi file sang Gemini API (Sử dụng gemini-3.8-flash)
             try:
                 uploaded_file = client.files.upload(file=local_file_path)
                 response = client.models.generate_content(
@@ -102,22 +107,27 @@ def scan_and_process_folder(service, folder_id):
                 )
                 client.files.delete(name=uploaded_file.name)
                 
-                # 3. Lưu file JSON tạm
-                local_json_path = f"{base_name}_PROCESSED.json"
-                with open(local_json_path, 'w', encoding='utf-8') as f:
-                    f.write(response.text)
-
-                # 4. Tải file JSON kết quả lên Google Drive
-                file_metadata = {'name': expected_json_name, 'parents': [folder_id]}
-                media = MediaFileUpload(local_json_path, mimetype='application/json')
-                service.files().create(body=file_metadata, media_body=media).execute()
+                # 3. Tải file JSON trực tiếp lên Google Drive (Xử lý khắc phục lỗi Storage Quota 403)
+                json_bytes = io.BytesIO(response.text.encode('utf-8'))
+                media = MediaIoBaseUpload(json_bytes, mimetype='application/json', resumable=True)
+                
+                file_metadata = {
+                    'name': expected_json_name,
+                    'parents': [folder_id]
+                }
+                
+                service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields='id',
+                    supportsAllDrives=True
+                ).execute()
+                
                 print(f"✅ Đã xuất file JSON thành công lên Google Drive!")
 
-                # 5. Dọn dẹp bộ nhớ tạm
+                # 4. Dọn dẹp bộ nhớ tạm
                 if os.path.exists(local_file_path):
                     os.remove(local_file_path)
-                if os.path.exists(local_json_path):
-                    os.remove(local_json_path)
 
             except Exception as e:
                 print(f"❌ Lỗi xử lý {file_name}: {str(e)}")
