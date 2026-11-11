@@ -32,7 +32,7 @@ def get_drive_service():
 
 PROMPT_KHOA_HOC = """
 Bạn là một trợ lý phân tích dữ liệu khoa học / kỹ thuật chuyên nghiệp.
-Hãy phân tích nội dung tài liệu dưới đây và trích xuất thông tin theo cấu trúc JSON chuẩn:
+Hãy phân tích tài liệu được cung cấp và trích xuất thông tin theo cấu trúc JSON chuẩn sau:
 
 {
   "metadata": {
@@ -49,8 +49,7 @@ Hãy phân tích nội dung tài liệu dưới đây và trích xuất thông t
     "key_notes": "Lưu ý đặc biệt, kết luận kiểm định hoặc quy chuẩn vận hành"
   }
 }
-
-NỘI DUNG TÀI LIỆU:
+Chỉ trả về JSON hợp lệ, không kèm lời giải thích văn bản.
 """
 
 def extract_text_from_bytes(file_bytes, file_extension):
@@ -132,7 +131,7 @@ def scan_and_process_folder(service, folder_id, current_path=""):
             print(f"\n📄 Đang xử lý tài liệu mới: {file_name}")
             print(f"📂 Vị trí: {current_path if current_path else 'Thư mục gốc'}")
 
-            # Tải file từ Google Drive về bộ nhớ RAM
+            # Tải file từ Google Drive về RAM
             request = service.files().get_media(fileId=file_id)
             file_stream = io.BytesIO()
             downloader = MediaIoBaseDownload(file_stream, request)
@@ -144,17 +143,17 @@ def scan_and_process_folder(service, folder_id, current_path=""):
             current_file_hash = calculate_md5(file_bytes)
             print(f"🔑 Mã Hash MD5: {current_file_hash}")
 
-            # Đọc trực tiếp văn bản từ file
+            # Trích xuất nội dung chữ từ file
             text_content = extract_text_from_bytes(file_bytes, ext)
             if not text_content:
                 print(f"⚠️ Không trích xuất được văn bản từ file {file_name}. Bỏ qua.")
                 continue
 
             try:
-                # Gọi Gemini API với văn bản đã trích xuất
-                full_prompt = f"{PROMPT_KHOA_HOC}\n\n{text_content[:30000]}" # Giới hạn ký tự an toàn
+                # Gửi văn bản trực tiếp sang model gemini-3.8-flash
+                full_prompt = f"{PROMPT_KHOA_HOC}\n\nNỘI DUNG TÀI LIỆU:\n{text_content[:30000]}"
                 response = client.models.generate_content(
-                    model='gemini-2.5-flash',
+                    model='gemini-3.8-flash',
                     contents=full_prompt,
                     config=types.GenerateContentConfig(response_mime_type="application/json")
                 )
