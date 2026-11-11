@@ -1,24 +1,20 @@
-name: Technical Data Warehouse Bot
+name: Automatic Document Processor
 
 on:
   workflow_dispatch:
   schedule:
-    # 01:00 UTC = 08:00 Vietnam time (UTC+7), every Monday
-    - cron: '0 1 * * 1'
+    - cron: '0 1 * * 1' # Chạy tự động vào 08:00 sáng Thứ Hai hàng tuần (giờ VN)
 
 concurrency:
-  group: technical-data-warehouse
+  group: json-library-processing
   cancel-in-progress: false
 
-permissions:
-  contents: read
-
 jobs:
-  process-drive:
+  run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 350
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -32,26 +28,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Validate required secrets
+      - name: Execute Bot
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
           SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
-        run: |
-          test -n "$GEMINI_API_KEY"
-          test -n "$DRIVE_FOLDER_ID"
-          test -n "$SERVICE_ACCOUNT_JSON"
-
-      - name: Run technical data warehouse
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
-          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
-          GEMINI_MODELS: ${{ vars.GEMINI_MODELS || 'gemini-3.8-flash' }}
           TARGET_TAGS: ${{ secrets.TARGET_TAGS }}
-          MAX_RETRIES: '3'
-          MAX_TEXT_CHARS: '400000'
-          SLEEP_BETWEEN_FILES: '1'
-          FORCE_REPROCESS: 'false'
-          LOG_LEVEL: INFO
+          GEMINI_MODELS: ${{ vars.GEMINI_MODELS || 'gemini-3.8-flash,gemini-2.5-flash' }}
         run: python main_bot.py
