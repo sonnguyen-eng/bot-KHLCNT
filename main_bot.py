@@ -16,7 +16,8 @@ DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID")
 SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
 
 # Lọc từ khóa/Model chỉ định (Ví dụ: ["EP6000"]) - Nếu để trống [] sẽ quét toàn bộ
-TARGET_TAGS = os.environ.get("TARGET_TAGS", "").split(",") if os.environ.get("TARGET_TAGS") else []
+raw_tags = os.environ.get("TARGET_TAGS", "")
+TARGET_TAGS = [t.strip() for t in raw_tags.split(",") if t.strip()]
 
 # Các định dạng tài liệu khoa học cho phép quét và xử lý
 ALLOWED_EXTENSIONS = ('.pdf', '.docx', '.xlsx', '.xls', '.png', '.jpg', '.jpeg')
@@ -66,8 +67,7 @@ def is_matching_tags(file_name, folder_path_str):
         return True
     combined_text = f"{file_name} {folder_path_str}".lower()
     for tag in TARGET_TAGS:
-        tag_clean = tag.strip().lower()
-        if tag_clean and tag_clean in combined_text:
+        if tag.lower() in combined_text:
             return True
     return False
 
@@ -112,7 +112,7 @@ def scan_and_process_folder(service, folder_id, current_path=""):
             print(f"\n📄 Đang xử lý tài liệu mới: {file_name}")
             print(f"📂 Vị trí: {current_path if current_path else 'Thư mục gốc'}")
 
-            # Tải nội dung file về bộ nhớ tạm để tính MD5 và gửi Gemini
+            # Tải nội dung file về bộ nhớ tạm
             request = service.files().get_media(fileId=file_id)
             file_stream = io.BytesIO()
             downloader = MediaIoBaseDownload(file_stream, request)
@@ -125,12 +125,13 @@ def scan_and_process_folder(service, folder_id, current_path=""):
             print(f"🔑 Mã Hash MD5: {current_file_hash}")
 
             # Ghi file ra đĩa cứng ảo GitHub để đẩy qua Gemini File API
-            local_file_path = f"temp_{file_name}"
+            safe_filename = os.path.basename(file_name)
+            local_file_path = f"temp_{safe_filename}"
             with open(local_file_path, 'wb') as f:
                 f.write(file_bytes)
 
             try:
-                # Gửi sang Gemini API (Sử dụng mô hình mới gemini-3.8-flash)
+                # Gửi sang Gemini API (Mô hình gemini-3.8-flash)
                 uploaded_file = client.files.upload(file=local_file_path)
                 response = client.models.generate_content(
                     model='gemini-3.8-flash',
@@ -144,7 +145,7 @@ def scan_and_process_folder(service, folder_id, current_path=""):
                 json_result["metadata"]["file_hash_md5"] = current_file_hash
                 json_result["metadata"]["original_filename"] = file_name
                 
-                # Tải file JSON trực tiếp lên Google Drive (Khắc phục lỗi 403 Storage Quota)
+                # Tải file JSON trực tiếp lên Google Drive (Dùng stream Byte để tránh lỗi 403 Storage Quota)
                 json_bytes = io.BytesIO(json.dumps(json_result, ensure_ascii=False, indent=2).encode('utf-8'))
                 media = MediaIoBaseUpload(json_bytes, mimetype='application/json', resumable=True)
                 
@@ -162,12 +163,13 @@ def scan_and_process_folder(service, folder_id, current_path=""):
                 
                 print(f"✅ Đã tạo file JSON thành công: {expected_json_v1}")
 
-                # Dọn dẹp đĩa tạm GitHub
-                if os.path.exists(local_file_path):
-                    os.remove(local_file_path)
-
             except Exception as e:
                 print(f"❌ Lỗi xử lý file {file_name}: {str(e)}")
+            
+            finally:
+                # Đảm bảo dọn dẹp file tạm trên đĩa cứng ngay cả khi xảy ra lỗi
+                if os.path.exists(local_file_path):
+                    os.remove(local_file_path)
 
 def main():
     service = get_drive_service()
