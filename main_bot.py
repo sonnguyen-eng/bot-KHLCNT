@@ -4,11 +4,8 @@ import io
 import hashlib
 import time
 import sys
-from google import genai
-from google.genai import types
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+import tempfile
+import urllib.parse
 
 # ---------------------------------------------------------
 # 1. TỰ ĐỘNG NHẬN DIỆN MÔI TRƯỜNG (COLAB / GITHUB ACTIONS)
@@ -38,7 +35,13 @@ else:
 TARGET_TAGS = TARGET_TAGS_STR.split(",") if TARGET_TAGS_STR else []
 ALLOWED_EXTENSIONS = ('.pdf', '.docx', '.xlsx', '.xls', '.png', '.jpg', '.jpeg')
 
-# 2. KHỞI TẠO CLIENTS SỬ DỤNG GEMINI 2.5 FLASH CỦA SDK MỚI (google-genai)
+from google import genai
+from google.genai import types
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+
+# 2. KHỞI TẠO CLIENTS SỬ DỤNG GEMINI 3.8 FLASH CỦA SDK MỚI (google-genai)
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 def get_drive_service():
@@ -89,7 +92,7 @@ def generate_content_with_retry(uploaded_file, prompt, max_retries=3):
     for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-3.8-flash',
                 contents=[uploaded_file, prompt],
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )
@@ -148,7 +151,11 @@ def scan_and_process_folder(service, folder_id, current_path=""):
             current_file_hash = calculate_md5(file_bytes)
             print(f"🔑 Mã Hash MD5: {current_file_hash}")
 
-            local_file_path = f"temp_{file_name}"
+            # Đặt tên file tạm thuần ASCII để tránh lỗi Unicode Encoding trên Google Colab API client
+            ext = os.path.splitext(file_name)[1]
+            safe_temp_name = f"temp_upload_{current_file_hash[:8]}{ext}"
+            local_file_path = os.path.join(tempfile.gettempdir(), safe_temp_name)
+
             with open(local_file_path, 'wb') as f:
                 f.write(file_bytes)
 
@@ -169,7 +176,6 @@ def scan_and_process_folder(service, folder_id, current_path=""):
                     'parents': [folder_id]
                 }
                 
-                # Cấu hình chính xác supportsAllDrives=True tại vị trí hàm create()
                 service.files().create(
                     body=file_metadata,
                     media_body=media,
