@@ -3,24 +3,48 @@ import json
 import io
 import hashlib
 import time
+import sys
+
+# ---------------------------------------------------------
+# 0. TỰ ĐỘNG XỬ LÝ MÔI TRƯỜNG (GOOGLE COLAB / GITHUB ACTIONS)
+# ---------------------------------------------------------
+IS_COLAB = 'google.colab' in sys.modules
+
+if IS_COLAB:
+    print("⚡ Đang chạy trên môi trường Google Colab")
+    try:
+        from google.colab import userdata
+        GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or userdata.get("GEMINI_API_KEY")
+        DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID") or userdata.get("DRIVE_FOLDER_ID")
+        SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON") or userdata.get("SERVICE_ACCOUNT_JSON")
+        TARGET_TAGS_STR = os.environ.get("TARGET_TAGS") or userdata.get("TARGET_TAGS")
+    except Exception:
+        GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+        DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID")
+        SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
+        TARGET_TAGS_STR = os.environ.get("TARGET_TAGS")
+else:
+    print("🖥️ Đang chạy trên môi trường GitHub Actions / Local Python")
+    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+    DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID")
+    SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
+    TARGET_TAGS_STR = os.environ.get("TARGET_TAGS")
+
+TARGET_TAGS = TARGET_TAGS_STR.split(",") if TARGET_TAGS_STR else []
+ALLOWED_EXTENSIONS = ('.pdf', '.docx', '.xlsx', '.xls', '.png', '.jpg', '.jpeg')
+
 from google import genai
 from google.genai import types
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
-# 1. BIẾN MÔI TRƯỜNG & SECRETS
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID")
-SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
-TARGET_TAGS = os.environ.get("TARGET_TAGS", "").split(",") if os.environ.get("TARGET_TAGS") else []
-
-ALLOWED_EXTENSIONS = ('.pdf', '.docx', '.xlsx', '.xls', '.png', '.jpg', '.jpeg')
-
-# 2. KHỞI TẠO CLIENTS
+# 1. KHỞI TẠO CLIENTS
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 def get_drive_service():
+    if not SERVICE_ACCOUNT_JSON:
+        raise ValueError("Thiếu cấu hình SERVICE_ACCOUNT_JSON trong biến môi trường hoặc Colab Secrets!")
     info = json.loads(SERVICE_ACCOUNT_JSON)
     creds = Credentials.from_service_account_info(
         info, scopes=['https://www.googleapis.com/auth/drive']
@@ -62,26 +86,24 @@ def is_matching_tags(file_name, folder_path_str):
             return True
     return False
 
-def generate_content_with_retry(uploaded_file, max_retries=3):
-    """Gọi Gemini API với cơ chế Retry khi gặp lỗi 503 UNAVAILABLE"""
-    for attempt in range(1, max_retries + 1):
+def generate_content_with_retry(uploaded_file, prompt, max_retries=3):
+    for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
                 model='gemini-3.8-flash',
-                contents=[uploaded_file, PROMPT_KHOA_HOC],
+                contents=[uploaded_file, prompt],
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )
             return response
         except Exception as e:
-            if "503" in str(e) or "UNAVAILABLE" in str(e):
-                wait_time = attempt * 10
-                print(f"⚠️ Server quá tải (503). Thử lại lần {attempt}/{max_retries} sau {wait_time}s...")
+            if attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 10
+                print(f"⚠️ Server quá tải/giới hạn quota ({e}). Thử lại lần {attempt + 1}/{max_retries} sau {wait_time}s...")
                 time.sleep(wait_time)
             else:
                 raise e
-    raise Exception("Vượt quá số lần thử lại với Gemini API.")
 
-# 3. QUÉT ĐỆ QUY VÀ TRÍCH XUẤT DỮ LIỆU
+# 2. QUÉT ĐỆ QUY VÀ TRÍCH XUẤT DỮ LIỆU
 def scan_and_process_folder(service, folder_id, current_path=""):
     query = f"'{folder_id}' in parents and trashed = false"
     results = service.files().list(
@@ -116,34 +138,26 @@ def scan_and_process_folder(service, folder_id, current_path=""):
             print(f"\n📄 Đang xử lý tài liệu mới: {file_name}")
             print(f"📂 Vị trí: {current_path if current_path else 'Thư mục gốc'}")
 
+            request = service.files().get_media(fileId=file_id)
+            file_stream = io.BytesIO()
+            downloader = MediaIoBaseDownload(file_stream, request)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+            
+            file_bytes = file_stream.getvalue()
+            current_file_hash = calculate_md5(file_bytes)
+            print(f"🔑 Mã Hash MD5: {current_file_hash}")
+
+            local_file_path = f"temp_{file_name}"
+            with open(local_file_path, 'wb') as f:
+                f.write(file_bytes)
+
+            uploaded_file = None
             try:
-                request = service.files().get_media(fileId=file_id)
-                file_stream = io.BytesIO()
-                downloader = MediaIoBaseDownload(file_stream, request)
-                done = False
-                while not done:
-                    _, done = downloader.next_chunk()
-                
-                file_bytes = file_stream.getvalue()
-                current_file_hash = calculate_md5(file_bytes)
-                print(f"🔑 Mã Hash MD5: {current_file_hash}")
-
-                local_file_path = f"temp_{file_id}_{file_name}"
-                with open(local_file_path, 'wb') as f:
-                    f.write(file_bytes)
-
                 uploaded_file = client.files.upload(file=local_file_path)
+                response = generate_content_with_retry(uploaded_file, PROMPT_KHOA_HOC)
                 
-                response = generate_content_with_retry(uploaded_file)
-                
-                try:
-                    client.files.delete(name=uploaded_file.name)
-                except Exception:
-                    pass
-
-                if os.path.exists(local_file_path):
-                    os.remove(local_file_path)
-
                 json_result = json.loads(response.text)
                 json_result["metadata"]["file_hash_md5"] = current_file_hash
                 json_result["metadata"]["original_filename"] = file_name
@@ -156,18 +170,25 @@ def scan_and_process_folder(service, folder_id, current_path=""):
                     'parents': [folder_id]
                 }
                 
-                # Sửa lỗi 403 Storage Quota: Thêm supportsAllDrives=True vào .execute()
                 service.files().create(
                     body=file_metadata,
                     media_body=media,
                     fields='id',
                     supportsAllDrives=True
-                ).execute(supportsAllDrives=True)
+                ).execute()
                 
                 print(f"✅ Đã tạo file JSON thành công: {expected_json_v1}")
 
             except Exception as e:
                 print(f"❌ Lỗi xử lý file {file_name}: {str(e)}")
+            finally:
+                if uploaded_file:
+                    try:
+                        client.files.delete(name=uploaded_file.name)
+                    except Exception:
+                        pass
+                if os.path.exists(local_file_path):
+                    os.remove(local_file_path)
 
 def main():
     service = get_drive_service()
