@@ -2,6 +2,7 @@ import os
 import json
 import io
 import hashlib
+import time
 from google import genai
 from google.genai import types
 from google.oauth2.service_account import Credentials
@@ -9,6 +10,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 import pypdf
+import pdfplumber
 import docx
 import openpyxl
 
@@ -57,11 +59,24 @@ def extract_text_from_bytes(file_bytes, file_extension):
     text_content = ""
     try:
         if file_extension == '.pdf':
-            reader = pypdf.PdfReader(io.BytesIO(file_bytes))
-            for page in reader.pages:
-                extracted = page.extract_text()
-                if extracted:
-                    text_content += extracted + "\n"
+            # Thử trích xuất với pypdf trước
+            try:
+                reader = pypdf.PdfReader(io.BytesIO(file_bytes))
+                for page in reader.pages:
+                    extracted = page.extract_text()
+                    if extracted:
+                        text_content += extracted + "\n"
+            except Exception:
+                pass
+            
+            # Nếu pypdf không lấy được chữ, dùng pdfplumber làm fallback
+            if not text_content.strip():
+                with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+                    for page in pdf.pages:
+                        extracted = page.extract_text()
+                        if extracted:
+                            text_content += extracted + "\n"
+
         elif file_extension == '.docx':
             doc = docx.Document(io.BytesIO(file_bytes))
             for para in doc.paragraphs:
@@ -94,6 +109,29 @@ def is_matching_tags(file_name, folder_path_str):
         if tag_clean and tag_clean in combined_text:
             return True
     return False
+
+def call_gemini_with_retry(prompt_text, max_retries=3):
+    """Gọi Gemini API có cơ chế Retry & chuyển đổi Model nếu quá tải"""
+    models_to_try = ['gemini-1.5-flash', 'gemini-2.0-flash']
+    
+    for model_name in models_to_try:
+        for attempt in range(max_retries):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt_text,
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )
+                return response.text
+            except Exception as e:
+                err_msg = str(e)
+                if "429" in err_msg or "503" in err_msg:
+                    print(f"⚠️ Model {model_name} bận/hết quota (Thử lại {attempt+1}/{max_retries} sau { (attempt+1)*5 }s)...")
+                    time.sleep((attempt + 1) * 5)
+                else:
+                    print(f"⚠️ Lỗi API với {model_name}: {err_msg}")
+                    break
+    raise Exception("Tất cả các lượt gọi Gemini API đều thất bại do quá tải quota hoặc sự cố hệ thống.")
 
 # 3. QUÉT ĐỆ QUY VÀ TRÍCH XUẤT DỮ LIỆU
 def scan_and_process_folder(service, folder_id, current_path=""):
@@ -131,7 +169,7 @@ def scan_and_process_folder(service, folder_id, current_path=""):
             print(f"\n📄 Đang xử lý tài liệu mới: {file_name}")
             print(f"📂 Vị trí: {current_path if current_path else 'Thư mục gốc'}")
 
-            # Tải file từ Google Drive về RAM
+            # Tải file từ Google Drive về bộ nhớ RAM
             request = service.files().get_media(fileId=file_id)
             file_stream = io.BytesIO()
             downloader = MediaIoBaseDownload(file_stream, request)
@@ -143,22 +181,17 @@ def scan_and_process_folder(service, folder_id, current_path=""):
             current_file_hash = calculate_md5(file_bytes)
             print(f"🔑 Mã Hash MD5: {current_file_hash}")
 
-            # Trích xuất nội dung chữ từ file
+            # Trích xuất văn bản trực tiếp
             text_content = extract_text_from_bytes(file_bytes, ext)
             if not text_content:
                 print(f"⚠️ Không trích xuất được văn bản từ file {file_name}. Bỏ qua.")
                 continue
 
             try:
-                # Gửi văn bản trực tiếp sang model gemini-3.8-flash
                 full_prompt = f"{PROMPT_KHOA_HOC}\n\nNỘI DUNG TÀI LIỆU:\n{text_content[:30000]}"
-                response = client.models.generate_content(
-                    model='gemini-3.8-flash',
-                    contents=full_prompt,
-                    config=types.GenerateContentConfig(response_mime_type="application/json")
-                )
+                response_text = call_gemini_with_retry(full_prompt)
                 
-                json_result = json.loads(response.text)
+                json_result = json.loads(response_text)
                 json_result["metadata"]["file_hash_md5"] = current_file_hash
                 json_result["metadata"]["original_filename"] = file_name
                 
@@ -170,6 +203,7 @@ def scan_and_process_folder(service, folder_id, current_path=""):
                     'parents': [folder_id]
                 }
                 
+                # Tạo file JSON trên Drive
                 service.files().create(
                     body=file_metadata,
                     media_body=media,
@@ -178,6 +212,7 @@ def scan_and_process_folder(service, folder_id, current_path=""):
                 ).execute()
                 
                 print(f"✅ Đã tạo file JSON thành công: {expected_json_v1}")
+                time.sleep(4) # Nghỉ giữa các file để tránh vượt giới hạn Quotas
 
             except Exception as e:
                 print(f"❌ Lỗi xử lý file {file_name}: {str(e)}")
