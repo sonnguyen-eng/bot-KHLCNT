@@ -1,453 +1,400 @@
 import os
+import sys
+import re
 import json
 import io
 import time
 import hashlib
-import sys
-from datetime import datetime, timezone
+import pypdf
+import docx
+import openpyxl
 from google import genai
-from google.genai import types, errors
-from google.oauth2.service_account import Credentials
+from google.genai import types
+from google.oauth2.service_account import Credentials as ServiceAccountCredentials
+from google.oauth2.credentials import Credentials as UserCredentials
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
-import pypdf
-import pdfplumber
-import docx
-from docx.table import Table
-from docx.text.paragraph import Paragraph
-import openpyxl
-
-# ============ 1. CẤU HÌNH HỆ THỐNG & BIẾN MÔI TRƯỜNG ============
+# ==============================================================================
+# 1. CẤU HÌNH HỆ THỐNG & BIẾN MÔI TRƯỜNG
+# ==============================================================================
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID")
+
+# Hỗ trợ đa phương thức xác thực Drive (OAuth User Token ưu tiên để tránh lỗi 403 Storage Quota)
+OAUTH_TOKEN_JSON = os.environ.get("OAUTH_TOKEN_JSON")
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
+GOOGLE_REFRESH_TOKEN = os.environ.get("GOOGLE_REFRESH_TOKEN")
 SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
-TARGET_TAGS = [t.strip().lower() for t in os.environ.get("TARGET_TAGS", "").split(",") if t.strip()]
 
-GEMINI_MODELS = [m.strip() for m in os.environ.get("GEMINI_MODELS", "gemini-3.8-flash,gemini-2.5-flash").split(",") if m.strip()]
-MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "4"))
-MAX_CHARS = int(os.environ.get("MAX_CHARS", "300000"))
-SLEEP_BETWEEN_FILES = float(os.environ.get("SLEEP_BETWEEN_FILES", "6"))
-MAX_INLINE_BYTES = 18 * 1024 * 1024  # Threshold 18MB cho Inline Payload
+TARGET_TAGS = [t.strip() for t in os.environ.get("TARGET_TAGS", "").split(",") if t.strip()]
 
-OUTPUT_SUFFIX = "_PROCESSED_V1.json"
-ALLOWED_EXTENSIONS = ('.pdf', '.docx', '.xlsx', '.png', '.jpg', '.jpeg', '.txt')
-FOLDER_MIME = 'application/vnd.google-apps.folder'
-
-EXPORT_MAP = {
-    'application/vnd.google-apps.document': ('application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.docx'),
-    'application/vnd.google-apps.spreadsheet': ('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.xlsx'),
-}
-
-DIRECT_MIME = {
-    '.pdf': 'application/pdf',
-    '.png': 'image/png',
-    '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg',
-}
+ALLOWED_EXTENSIONS = ('.pdf', '.docx', '.xlsx', '.xls', '.png', '.jpg', '.jpeg')
+MODEL_PRIORITY_LIST = ['gemini-3.8-flash', 'gemini-3.8-flash-lite', 'gemini-3.8-pro']
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# JSON Schema tương thích 100% với Gemini Developer API Mode
-EXTRACTION_SCHEMA = {
-    "type": "OBJECT",
-    "properties": {
-        "metadata": {
-            "type": "OBJECT",
-            "properties": {
-                "model_name": {"type": "STRING", "description": "Tên Model / Thiết bị / Sản phẩm chính"},
-                "document_type": {"type": "STRING", "description": "Brochure / IFU / SpecSheet / DataSheet / Manual / TestReport / Certificate / Other"},
-                "version": {"type": "STRING", "description": "Số phiên bản (VD: V1, V2...). Nếu không có thì ghi V1"},
-                "suggested_standard_name": {"type": "STRING", "description": "Tên đặt chuẩn hóa: [Model]_[DocType]_V[Version]"},
-                "search_tags": {
-                    "type": "ARRAY",
-                    "items": {"type": "STRING"},
-                    "description": "3-5 từ khóa chính phục vụ truy vấn nhanh"
-                }
-            },
-            "required": ["model_name", "document_type", "version", "suggested_standard_name", "search_tags"]
-        },
-        "extracted_data": {
-            "type": "OBJECT",
-            "properties": {
-                "title": {"type": "STRING", "description": "Tiêu đề chính của tài liệu"},
-                "summary": {"type": "STRING", "description": "Tóm tắt ngắn gọn nội dung khoa học/kỹ thuật cốt lõi (100-200 từ)"},
-                "technical_specifications": {
-                    "type": "ARRAY",
-                    "description": "Danh sách các thông số kỹ thuật được trích xuất",
-                    "items": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "name": {"type": "STRING", "description": "Tên thông số kỹ thuật"},
-                            "value": {"type": "STRING", "description": "Giá trị của thông số"},
-                            "unit": {"type": "STRING", "nullable": True, "description": "Đơn vị đo (nếu không có ghi null)"}
-                        },
-                        "required": ["name", "value"]
-                    }
-                },
-                "key_notes": {"type": "STRING", "description": "Lưu ý đặc biệt, kết luận kiểm định hoặc quy chuẩn vận hành"}
-            },
-            "required": ["title", "summary", "technical_specifications", "key_notes"]
-        }
-    },
-    "required": ["metadata", "extracted_data"]
-}
-
 PROMPT_KHOA_HOC = """
 Bạn là một trợ lý phân tích dữ liệu khoa học / kỹ thuật chuyên nghiệp.
-Hãy phân tích tài liệu được cung cấp và trích xuất thông tin chính xác theo JSON Schema được chỉ định.
+Hãy phân tích tài liệu được cung cấp và trích xuất thông tin theo đúng cấu trúc JSON chuẩn sau:
 
-QUY TẮC BẮT BUỘC:
-- Chỉ sử dụng thông tin có sẵn trong tài liệu. Không suy đoán; thông tin không có thì để null.
-- Giữ nguyên toàn bộ số liệu, đơn vị đo, ký hiệu kỹ thuật như bản gốc.
-- Trích xuất đầy đủ các bảng thông số kỹ thuật vào "technical_specifications".
+{
+  "metadata": {
+    "model_name": "Tên Model / Thiết bị / Sản phẩm chính (VD: EP-6000, EP-8000)",
+    "document_type": "Loại tài liệu (Brochure / IFU / SpecSheet / DataSheet / Manual / TestReport / Certificate)",
+    "language": "Ngôn ngữ tài liệu (VI / EN)",
+    "version": "Số phiên bản (VD: V1, V2...) nếu không có thì ghi V1",
+    "suggested_standard_name": "Tên đặt chuẩn hóa: [Model]_[DocType]_[Language]_V[Version]",
+    "search_tags": ["Danh sách 5-8 từ khóa kỹ thuật chính phục vụ truy vấn nhanh"]
+  },
+  "extracted_data": {
+    "title": "Tiêu đề chính của tài liệu",
+    "summary": "Tóm tắt súc tích nội dung khoa học/kỹ thuật cốt lõi (100-250 từ)",
+    "technical_specifications": {
+      "Nhom_thong_so": {
+        "Ten_thong_so": "Gia_tri_kem_don_vi"
+      }
+    },
+    "compatible_accessories_or_models": ["Danh sách model/phụ kiện tương thích nếu có"],
+    "key_notes": "Lưu ý đặc biệt, tiêu chuẩn chất lượng, cảnh báo an toàn hoặc quy chuẩn vận hành"
+  }
+}
+YÊU CẦU BẮT BUỘC:
+- Trích xuất đầy đủ và chính xác 100% các thông số kỹ thuật có trong tài liệu vào mục technical_specifications.
+- Chỉ trả về JSON hợp lệ, tuyệt đối không kèm markdown ```json hay lời giải thích văn bản bên ngoài.
 """
 
-# ============ 2. KẾT NỐI VÀ THAO TÁC GOOGLE DRIVE ============
+
+# ==============================================================================
+# 2. KẾT NỐI GOOGLE DRIVE (CHỐNG LỖI 403 STORAGE QUOTA)
+# ==============================================================================
 def get_drive_service():
-    info = json.loads(SERVICE_ACCOUNT_JSON)
-    creds = Credentials.from_service_account_info(
-        info, scopes=['https://www.googleapis.com/auth/drive']
-    )
-    return build('drive', 'v3', credentials=creds, cache_discovery=False)
+    scopes = ['[https://www.googleapis.com/auth/drive](https://www.googleapis.com/auth/drive)']
 
-def list_children(service, folder_id):
-    items, token = [], None
-    while True:
-        res = service.files().list(
-            q=f"'{folder_id}' in parents and trashed = false",
-            fields="nextPageToken, files(id, name, mimeType, md5Checksum, modifiedTime, appProperties)",
-            pageSize=1000,
-            pageToken=token,
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
-        ).execute()
-        items.extend(res.get('files', []))
-        token = res.get('nextPageToken')
-        if not token:
-            return items
+    # Phương án 1: OAuth Token dạng JSON nguyên khối
+    if OAUTH_TOKEN_JSON:
+        print("🔐 Đang xác thực Google Drive bằng OAUTH_TOKEN_JSON...")
+        token_info = json.loads(OAUTH_TOKEN_JSON)
+        creds = UserCredentials.from_authorized_user_info(token_info, scopes)
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        return build('drive', 'v3', credentials=creds)
 
-def download_bytes(service, request):
-    stream = io.BytesIO()
-    downloader = MediaIoBaseDownload(stream, request)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-    return stream.getvalue()
+    # Phương án 2: OAuth Token tách 3 biến (Client ID, Secret, Refresh Token)
+    if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN:
+        print("🔐 Đang xác thực Google Drive bằng OAuth Refresh Token...")
+        creds = UserCredentials(
+            token=None,
+            refresh_token=GOOGLE_REFRESH_TOKEN,
+            token_uri="[https://oauth2.googleapis.com/token](https://oauth2.googleapis.com/token)",
+            client_id=GOOGLE_CLIENT_ID,
+            client_secret=GOOGLE_CLIENT_SECRET,
+            scopes=scopes
+        )
+        creds.refresh(Request())
+        return build('drive', 'v3', credentials=creds)
 
-def save_json_to_drive(service, target_folder_id, json_name, data, app_props, existing_id=None):
-    """Lưu JSON trực tiếp vào đúng thư mục con target_folder_id (Tránh lỗi 403 Storage Quota)."""
-    payload = json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8')
-    media = MediaIoBaseUpload(io.BytesIO(payload), mimetype='application/json', resumable=True)
-    
-    if existing_id:
-        service.files().update(
-            fileId=existing_id,
-            body={'appProperties': app_props},
-            media_body=media,
-            supportsAllDrives=True
-        ).execute()
-    else:
-        file_metadata = {
-            'name': json_name,
-            'parents': [target_folder_id],
-            'appProperties': app_props
-        }
-        service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id',
-            supportsAllDrives=True
-        ).execute()
+    # Phương án 3: Service Account (Chỉ dùng khi thư mục nằm trên Shared Drive)
+    if SERVICE_ACCOUNT_JSON:
+        print("🔑 Đang xác thực Google Drive bằng Service Account...")
+        sa_info = json.loads(SERVICE_ACCOUNT_JSON)
+        creds = ServiceAccountCredentials.from_service_account_info(sa_info, scopes=scopes)
+        return build('drive', 'v3', credentials=creds)
 
-# ============ 3. TRÍCH XUẤT VĂN BẢN TRÊN PYTHON ============
-def _rows_to_text(rows):
-    lines = []
-    for row in rows:
-        cells = [str(c).strip() for c in row if c is not None and str(c).strip()]
-        if cells:
-            lines.append(" | ".join(cells))
-    return "\n".join(lines)
+    raise ValueError("Thiếu thông tin xác thực Google Drive trong GitHub Secrets.")
 
-def extract_pdf_text_fallback(file_bytes):
-    parts = []
-    try:
-        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            for i, page in enumerate(pdf.pages, 1):
-                text = page.extract_text() or ""
-                tables = page.extract_tables() or []
-                block = text
-                for t in tables:
-                    block += "\n[BẢNG]\n" + _rows_to_text(t)
-                if block.strip():
-                    parts.append(f"--- Trang {i} ---\n{block}")
-    except Exception:
-        pass
-        
-    if not parts:
-        try:
-            reader = pypdf.PdfReader(io.BytesIO(file_bytes))
-            for i, page in enumerate(reader.pages, 1):
-                t = page.extract_text()
-                if t and t.strip():
-                    parts.append(f"--- Trang {i} ---\n{t}")
-        except Exception:
-            pass
-    return "\n".join(parts)
 
-def extract_docx(file_bytes):
-    d = docx.Document(io.BytesIO(file_bytes))
-    lines = []
-    for child in d.element.body.iterchildren():
-        if child.tag.endswith('}p'):
-            text = Paragraph(child, d).text
-            if text.strip():
-                lines.append(text)
-        elif child.tag.endswith('}tbl'):
-            tbl = Table(child, d)
-            lines.append("[BẢNG]\n" + _rows_to_text([[c.text for c in r.cells] for r in tbl.rows]))
-    return "\n".join(lines)
+def calculate_md5(file_content_bytes):
+    return hashlib.md5(file_content_bytes).hexdigest()
 
-def extract_xlsx(file_bytes):
-    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
-    parts = []
-    for ws in wb.worksheets:
-        body = _rows_to_text(ws.iter_rows(values_only=True))
-        if body:
-            parts.append(f"--- Sheet: {ws.title} ---\n{body}")
-    return "\n".join(parts)
 
-def extract_text_from_bytes(file_bytes, ext):
-    try:
-        if ext == '.docx':
-            return extract_docx(file_bytes).strip()
-        elif ext == '.xlsx':
-            return extract_xlsx(file_bytes).strip()
-        elif ext == '.txt':
-            return file_bytes.decode('utf-8', errors='ignore').strip()
-        elif ext == '.pdf':
-            return extract_pdf_text_fallback(file_bytes).strip()
-    except Exception as e:
-        print(f"   ⚠️ Lỗi trích xuất văn bản ({ext}): {e}")
-    return ""
-
-# ============ 4. KẾT NỐI GEMINI API & SỬA LỖI SIZE/QUOTA ============
-def call_gemini_with_fallback(file_bytes, ext, file_name):
-    """
-    Xử lý thông minh: 
-    - File <= 18MB: Dùng types.Part.from_bytes (Inline Byte Payload)
-    - File > 18MB: Dùng client.files.upload (Files API) và tự dọn dẹp file tạm
-    """
-    uploaded_file_ref = None
-    temp_file_path = None
-
-    try:
-        if ext in DIRECT_MIME:
-            if len(file_bytes) <= MAX_INLINE_BYTES:
-                contents = [
-                    types.Part.from_bytes(data=file_bytes, mime_type=DIRECT_MIME[ext]),
-                    PROMPT_KHOA_HOC
-                ]
-            else:
-                print(f"   📦 File lớn ({len(file_bytes) / (1024*1024):.1f}MB > 18MB). Chuyển sang luồng Files API...")
-                temp_file_path = f"temp_{int(time.time())}_{file_name}"
-                with open(temp_file_path, "wb") as f:
-                    f.write(file_bytes)
-                uploaded_file_ref = client.files.upload(file=temp_file_path)
-                contents = [uploaded_file_ref, PROMPT_KHOA_HOC]
-        else:
-            text = extract_text_from_bytes(file_bytes, ext)
-            if not text:
-                return None, None
-            contents = f"{PROMPT_KHOA_HOC}\n\nNỘI DUNG TÀI LIỆU TRÍCH XUẤT:\n{text[:MAX_CHARS]}"
-
-        for model in GEMINI_MODELS:
-            for attempt in range(1, MAX_RETRIES + 1):
-                try:
-                    resp = client.models.generate_content(
-                        model=model,
-                        contents=contents,
-                        config=types.GenerateContentConfig(
-                            response_mime_type="application/json",
-                            response_schema=EXTRACTION_SCHEMA,
-                            temperature=0.1,
-                        ),
-                    )
-                    data = json.loads(resp.text)
-                    if not isinstance(data, dict):
-                        raise ValueError("Dữ liệu JSON không đạt chuẩn dict/object")
-                    return data, model
-
-                except errors.APIError as e:
-                    code = getattr(e, "code", None)
-                    if code in (429, 500, 502, 503, 504):
-                        wait = 15 * (2 ** (attempt - 1)) # Tăng thời gian chờ lũy thừa (15s, 30s, 60s, 120s)
-                        print(f"   ⚠️ Model {model} gặp lỗi {code} (lần {attempt}/{MAX_RETRIES}), chờ {wait}s...")
-                        time.sleep(wait)
-                    else:
-                        print(f"   ⚠️ Model {model} báo lỗi {code}: {e}. Chuyển sang model dự phòng.")
-                        break
-                except (ValueError, TypeError) as e:
-                    print(f"   ⚠️ Model {model} trả JSON sai cấu trúc ({e}), thử lại sau 3s...")
-                    time.sleep(3)
-
-        raise RuntimeError("Tất cả các mô hình Gemini trong cấu hình đều quá tải hoặc bị gián đoạn.")
-
-    finally:
-        # Dọn dẹp tài nguyên tạm
-        if uploaded_file_ref:
-            try:
-                client.files.delete(name=uploaded_file_ref.name)
-            except Exception:
-                pass
-        if temp_file_path and os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
-
-def normalize_json_structure(data):
-    if not isinstance(data, dict):
-        data = {}
-    data.setdefault("metadata", {})
-    data.setdefault("extracted_data", {})
-    if not isinstance(data["metadata"], dict):
-        data["metadata"] = {}
-    if not isinstance(data["extracted_data"], dict):
-        data["extracted_data"] = {}
-        
-    # Chuyển đổi mảng technical_specifications thành Dict Key-Value nhất quán
-    specs_raw = data["extracted_data"].get("technical_specifications")
-    if isinstance(specs_raw, list):
-        specs_dict = {}
-        for item in specs_raw:
-            if isinstance(item, dict) and "name" in item:
-                spec_name = item["name"]
-                specs_dict[spec_name] = {
-                    "value": item.get("value"),
-                    "unit": item.get("unit")
-                }
-        data["extracted_data"]["technical_specifications"] = specs_dict
-
-    return data
-
-def matches_tags(name, path):
+def is_matching_tags(file_name, folder_path_str):
     if not TARGET_TAGS:
         return True
-    combined = f"{name} {path}".lower()
-    return any(t in combined for t in TARGET_TAGS)
+    combined_text = f"{file_name} {folder_path_str}".lower()
+    return any(tag.lower() in combined_text for tag in TARGET_TAGS)
 
-# ============ 5. QUÉT VÀ TRÍCH XUẤT ĐỆ QUY THƯ MỤC ============
-def scan_and_process_folder(service, folder_id, stats, current_path=""):
-    items = list_children(service, folder_id)
 
-    done_by_source = {}
-    for f in items:
-        if f['name'].endswith(OUTPUT_SUFFIX):
-            props = f.get('appProperties') or {}
-            if props.get('source_id'):
-                done_by_source[props['source_id']] = (f['id'], props.get('source_sig'))
+# ==============================================================================
+# 3. TRÍCH XUẤT VĂN BẢN THÔNG MINH & BẢO TOÀN BẢNG THÔNG SỐ KỸ THUẬT
+# ==============================================================================
+def extract_and_prioritize_text(file_bytes, file_ext, max_chars=350000):
+    """Trích xuất text từ PDF/DOCX/XLSX. Nếu quá dài, ưu tiên giữ phần đầu và các trang chứa bảng thông số."""
+    pages_text = []
+    try:
+        if file_ext == '.pdf':
+            reader = pypdf.PdfReader(io.BytesIO(file_bytes))
+            for idx, page in enumerate(reader.pages):
+                txt = page.extract_text() or ""
+                if txt.strip():
+                    pages_text.append((idx + 1, f"--- TRANG {idx + 1} ---\n{txt}"))
+        elif file_ext == '.docx':
+            doc = docx.Document(io.BytesIO(file_bytes))
+            block = []
+            for para in doc.paragraphs:
+                if para.text.strip():
+                    block.append(para.text)
+            for table in doc.tables:
+                for row in table.rows:
+                    block.append(" | ".join(c.text.strip().replace('\n', ' ') for c in row.cells))
+            if block:
+                pages_text.append((1, "\n".join(block)))
+        elif file_ext in ('.xlsx', '.xls'):
+            wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+            for idx, sheet in enumerate(wb.sheetnames):
+                ws = wb[sheet]
+                rows = [f"=== SHEET: {sheet} ==="]
+                for row in ws.iter_rows(values_only=True):
+                    if any(row):
+                        rows.append(" | ".join(str(v).strip() if v is not None else "" for v in row))
+                pages_text.append((idx + 1, "\n".join(rows)))
+    except Exception as e:
+        print(f"   ⚠️ Không thể đọc text cục bộ ({e}), chuyển sang luồng Files API.")
+        return ""
+
+    full_text = "\n".join(p[1] for p in pages_text).strip()
+    if len(full_text) <= 500:
+        return ""  # PDF dạng scan ảnh
+
+    if len(full_text) <= max_chars:
+        return full_text
+
+    # Nếu tài liệu quá lớn (như IFU hàng trăm trang): Giữ 20% đầu (Mục lục/Tổng quan) + Các trang chứa từ khóa thông số
+    spec_keywords = re.compile(
+        r"(specification|thông số|kích thước|dimension|weight|trọng lượng|power|nguồn điện|voltage|"
+        r"resolution|độ phân giải|compatible|tương thích|operating|môi trường|rating|model|appendix|phụ lục)",
+        re.IGNORECASE
+    )
+    selected = []
+    current_len = 0
+    head_limit = int(max_chars * 0.25)
+
+    for page_num, content in pages_text:
+        if current_len < head_limit:
+            selected.append(content)
+            current_len += len(content)
+        elif spec_keywords.search(content) and current_len + len(content) <= max_chars:
+            selected.append(content)
+            current_len += len(content)
+
+    return "\n".join(selected)
+
+
+# ==============================================================================
+# 4. GỌI GEMINI API VỚI RETRY & FALLBACK CHỐNG QUÁ TẢI 429/503
+# ==============================================================================
+def generate_structured_json(file_bytes, file_name):
+    file_ext = os.path.splitext(file_name)[1].lower()
+    extracted_text = extract_and_prioritize_text(file_bytes, file_ext)
+
+    uploaded_file = None
+    local_temp_path = None
+
+    try:
+        if extracted_text:
+            print(f"   ⚡ Đã tinh lọc văn bản kỹ thuật ({len(extracted_text):,} ký tự) -> Gửi trực tiếp siêu tốc.")
+            contents_payload = [f"TÊN FILE GỐC: {file_name}\n\nNỘI DUNG TÀI LIỆU:\n{extracted_text}", PROMPT_KHOA_HOC]
+        else:
+            size_mb = len(file_bytes) / (1024 * 1024)
+            print(f"   📦 Tài liệu dạng Scan/Hình ảnh ({size_mb:.1f} MB). Tải qua Gemini Files API...")
+            local_temp_path = f"temp_{hashlib.md5(file_name.encode()).hexdigest()}{file_ext}"
+            with open(local_temp_path, 'wb') as f:
+                f.write(file_bytes)
+            uploaded_file = client.files.upload(file=local_temp_path)
+            contents_payload = [uploaded_file, f"TÊN FILE GỐC: {file_name}", PROMPT_KHOA_HOC]
+
+        for model_name in MODEL_PRIORITY_LIST:
+            backoff_delays = [15, 30, 60]
+            for attempt in range(len(backoff_delays) + 1):
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=contents_payload,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            temperature=0.1
+                        )
+                    )
+                    return json.loads(response.text)
+                except Exception as e:
+                    err_msg = str(e)
+                    if "404" in err_msg or "NOT_FOUND" in err_msg:
+                        print(f"   ⚠️ Model {model_name} báo 404, chuyển sang model dự phòng...")
+                        break
+                    if ("429" in err_msg or "503" in err_msg or "RESOURCE_EXHAUSTED" in err_msg) and attempt < len(backoff_delays):
+                        wait_sec = backoff_delays[attempt]
+                        print(f"   ⚠️ Model {model_name} quá tải (lần {attempt + 1}/{len(backoff_delays)}), chờ {wait_sec}s...")
+                        time.sleep(wait_sec)
+                    else:
+                        print(f"   ⚠️ Lỗi trên {model_name}: {err_msg[:180]}")
+                        break
+
+        raise RuntimeError("Tất cả các mô hình Gemini thế hệ 3.8 đều quá tải hoặc bị gián đoạn.")
+
+    finally:
+        if uploaded_file:
+            try:
+                client.files.delete(name=uploaded_file.name)
+            except Exception:
+                pass
+        if local_temp_path and os.path.exists(local_temp_path):
+            os.remove(local_temp_path)
+
+
+# ==============================================================================
+# 5. QUÉT ĐỆ QUY & KIỂM SOÁT PHIÊN BẢN MD5
+# ==============================================================================
+def get_existing_json_info(service, folder_id, base_name, items):
+    """Kiểm tra các file [base_name]_PROCESSED_V*.json hiện có để đối chiếu MD5 và xác định version tiếp theo."""
+    pattern = re.compile(rf"^{re.escape(base_name)}_PROCESSED_V(\d+)\.json$")
+    matched_files = []
+    for item in items:
+        m = pattern.match(item['name'])
+        if m:
+            matched_files.append((int(m.group(1)), item['id'], item['name']))
+
+    if not matched_files:
+        return None, 1
+
+    matched_files.sort(key=lambda x: x[0], reverse=True)
+    latest_ver, latest_id, latest_name = matched_files[0]
+
+    try:
+        req = service.files().get_media(fileId=latest_id, supportsAllDrives=True)
+        buf = io.BytesIO()
+        downloader = MediaIoBaseDownload(buf, req)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        data = json.loads(buf.getvalue().decode('utf-8'))
+        saved_md5 = data.get("metadata", {}).get("file_hash_md5")
+        return saved_md5, latest_ver + 1
+    except Exception:
+        return None, latest_ver + 1
+
+
+def scan_and_process_folder(service, folder_id, current_path="", stats=None):
+    if stats is None:
+        stats = {"success": 0, "skipped": 0, "failed": 0}
+
+    page_token = None
+    items = []
+    while True:
+        query = f"'{folder_id}' in parents and trashed = false"
+        results = service.files().list(
+            q=query,
+            fields="nextPageToken, files(id, name, mimeType, md5Checksum)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            pageToken=page_token
+        ).execute()
+        items.extend(results.get('files', []))
+        page_token = results.get('nextPageToken')
+        if not page_token:
+            break
 
     for item in items:
-        fid = item['id']
-        name = item['name']
-        mime = item['mimeType']
+        file_id = item['id']
+        file_name = item['name']
+        mime_type = item['mimeType']
 
-        if mime == FOLDER_MIME:
-            scan_and_process_folder(service, fid, stats, f"{current_path}/{name}")
-            continue
+        if mime_type == 'application/vnd.google-apps.folder':
+            scan_and_process_folder(service, file_id, f"{current_path}/{file_name}", stats)
 
-        export_info = EXPORT_MAP.get(mime)
-        if export_info:
-            export_mime, ext = export_info
-            clean_ext_name = ext.replace('.', '')
-            base_name = f"{name}_{clean_ext_name}"
-        else:
-            if not name.lower().endswith(ALLOWED_EXTENSIONS):
-                continue
-            ext = os.path.splitext(name)[1].lower()
-            clean_ext_name = ext.replace('.', '')
-            base_name = f"{os.path.splitext(name)[0]}_{clean_ext_name}"
-            export_mime = None
-
-        if not matches_tags(name, current_path):
-            continue
-
-        json_name = f"{base_name}{OUTPUT_SUFFIX}"
-        signature = item.get('md5Checksum') or item.get('modifiedTime')
-
-        existing_json_id = None
-        if fid in done_by_source:
-            existing_json_id, old_sig = done_by_source[fid]
-            if old_sig and old_sig == signature:
-                stats['skipped'] += 1
-                print(f"⏩ Bỏ qua (Dữ liệu không đổi): {name}")
-                continue
-            print(f"\n🔄 File nguồn đã cập nhật, tiến hành trích xuất lại: {name}")
-        else:
-            print(f"\n📄 Phát hiện tài liệu mới: {name}")
-
-        print(f"   📂 Vị trí: {current_path or 'Thư mục gốc'}")
-
-        try:
-            if export_mime:
-                req = service.files().export_media(fileId=fid, mimeType=export_mime)
-            else:
-                req = service.files().get_media(fileId=fid, supportsAllDrives=True)
-                
-            file_bytes = download_bytes(service, req)
-            file_hash = hashlib.md5(file_bytes).hexdigest()
-
-            print("   🚀 Gửi dữ liệu sang Gemini trích xuất (Structured Output)...")
-            result_data, used_model = call_gemini_with_fallback(file_bytes, ext, name)
-            
-            if not result_data:
-                print("   ⚠️ Không trích xuất được nội dung từ file. Bỏ qua.")
-                stats['skipped'] += 1
+        elif file_name.lower().endswith(ALLOWED_EXTENSIONS):
+            if not is_matching_tags(file_name, current_path):
                 continue
 
-            result_data = normalize_json_structure(result_data)
+            base_name = os.path.splitext(file_name)[0]
+            saved_md5, next_version = get_existing_json_info(service, folder_id, base_name, items)
+            drive_md5 = item.get('md5Checksum')
 
-            # Cập nhật siêu dữ liệu truy vết
-            result_data["metadata"].update({
-                "file_hash_md5": file_hash,
-                "original_filename": name,
-                "source_drive_id": fid,
-                "source_path": current_path or "/",
-                "processed_at": datetime.now(timezone.utc).isoformat(),
-                "processed_by_model": used_model,
-            })
+            # So sánh nhanh MD5 từ metadata của Drive trước khi tải file để tiết kiệm băng thông
+            if saved_md5 and drive_md5 and saved_md5 == drive_md5:
+                print(f"⏩ Bỏ qua (Trùng khớp MD5 V{next_version - 1}): {current_path}/{file_name}")
+                stats["skipped"] += 1
+                continue
 
-            # Ghi JSON trực tiếp vào đúng thư mục con hiện tại
-            save_json_to_drive(
-                service=service,
-                target_folder_id=folder_id,
-                json_name=json_name,
-                data=result_data,
-                app_props={"source_id": fid, "source_sig": signature or ""},
-                existing_id=existing_json_id
-            )
+            print(f"\n📄 Phát hiện tài liệu cần xử lý: {file_name}")
+            print(f"   📂 Vị trí: {current_path if current_path else 'Thư mục gốc'}")
 
-            stats['ok'] += 1
-            print(f"   ✅ Đã tạo JSON thành công: {json_name} (Mô hình: {used_model})")
-            time.sleep(SLEEP_BETWEEN_FILES)
+            try:
+                request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+                file_stream = io.BytesIO()
+                downloader = MediaIoBaseDownload(file_stream, request)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk()
 
-        except Exception as e:
-            stats['failed'] += 1
-            print(f"   ❌ Lỗi khi xử lý file {name}: {e}")
+                file_bytes = file_stream.getvalue()
+                current_file_hash = calculate_md5(file_bytes)
+                print(f"   🔑 Mã Hash MD5: {current_file_hash}")
+
+                if saved_md5 and saved_md5 == current_file_hash:
+                    print(f"⏩ Bỏ qua (Trùng khớp MD5 V{next_version - 1}): {file_name}")
+                    stats["skipped"] += 1
+                    continue
+
+                print("   🚀 Gửi dữ liệu sang Gemini trích xuất (Structured Output)...")
+                json_result = generate_structured_json(file_bytes, file_name)
+
+                if "metadata" not in json_result or not isinstance(json_result["metadata"], dict):
+                    json_result["metadata"] = {}
+                json_result["metadata"]["file_hash_md5"] = current_file_hash
+                json_result["metadata"]["original_filename"] = file_name
+                json_result["metadata"]["version"] = f"V{next_version}"
+
+                output_json_name = f"{base_name}_PROCESSED_V{next_version}.json"
+                json_bytes = io.BytesIO(json.dumps(json_result, ensure_ascii=False, indent=2).encode('utf-8'))
+                media = MediaIoBaseUpload(json_bytes, mimetype='application/json', resumable=False)
+
+                file_metadata = {
+                    'name': output_json_name,
+                    'parents': [folder_id]
+                }
+
+                service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields='id',
+                    supportsAllDrives=True
+                ).execute()
+
+                print(f"   ✅ Đã tạo file JSON thành công: {output_json_name}")
+                stats["success"] += 1
+                time.sleep(4)
+
+            except Exception as e:
+                print(f"   ❌ Lỗi khi xử lý file {file_name}: {str(e)}")
+                stats["failed"] += 1
+
+    return stats
+
 
 def main():
+    if not GEMINI_API_KEY or not DRIVE_FOLDER_ID:
+        print("❌ Lỗi cấu hình: Thiếu GEMINI_API_KEY hoặc DRIVE_FOLDER_ID trong GitHub Secrets.")
+        sys.exit(1)
+
     service = get_drive_service()
-    print(f"🔍 Từ khóa lọc (TARGET_TAGS): {TARGET_TAGS}" if TARGET_TAGS else "🌐 Quét toàn bộ thư viện THU_VIEN_SAN_PHAM...")
-    print(f"🤖 Danh sách Mô hình Ưu tiên: {GEMINI_MODELS}")
+    print(f"🤖 Danh sách Mô hình Ưu tiên: {MODEL_PRIORITY_LIST}")
+    if TARGET_TAGS:
+        print(f"🔍 Đang chạy chế độ lọc theo từ khóa: {TARGET_TAGS}")
+    else:
+        print("🌐 Đang chạy chế độ quét toàn bộ thư viện THU_VIEN_SAN_PHAM...")
 
-    stats = {'ok': 0, 'skipped': 0, 'failed': 0}
-    scan_and_process_folder(service, DRIVE_FOLDER_ID, stats)
+    stats = scan_and_process_folder(service, DRIVE_FOLDER_ID)
 
-    print(f"\n📊 BÁO CÁO TỔNG KẾT VẬN HÀNH:")
-    print(f"   ✔️ Thành công: {stats['ok']}")
+    print("\n📊 BÁO CÁO TỔNG KẾT VẬN HÀNH:")
+    print(f"   ✔️ Thành công: {stats['success']}")
     print(f"   ⏩ Bỏ qua:     {stats['skipped']}")
     print(f"   ❌ Thất bại:   {stats['failed']}")
 
-    if stats['failed'] > 0:
+    if stats["failed"] > 0:
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
