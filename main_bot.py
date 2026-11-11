@@ -9,8 +9,11 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
-# 1. BIẾN MÔI TRƯỜNG & SECRETS
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+# 1. BIẾN MÔI TRƯỜNG & SECRETS (HỖ TRỢ NHIỀU API KEYS CHỐNG HẾT QUOTA)
+RAW_GEMINI_KEYS = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_API_KEYS = [k.strip() for k in RAW_GEMINI_KEYS.split(",") if k.strip()]
+current_key_index = 0
+
 DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID")
 SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
 TARGET_TAGS = os.environ.get("TARGET_TAGS", "").split(",") if os.environ.get("TARGET_TAGS") else []
@@ -18,15 +21,31 @@ TARGET_TAGS = os.environ.get("TARGET_TAGS", "").split(",") if os.environ.get("TA
 ALLOWED_EXTENSIONS = ('.pdf', '.docx', '.xlsx', '.xls', '.png', '.jpg', '.jpeg')
 PRIMARY_MODEL = "gemini-3.8-flash"
 
-# 2. KHỞI TẠO CLIENTS
-client = genai.Client(api_key=GEMINI_API_KEY)
-
+# 2. KHỞI TẠO SERVICES
 def get_drive_service():
     info = json.loads(SERVICE_ACCOUNT_JSON)
     creds = Credentials.from_service_account_info(
         info, scopes=['https://www.googleapis.com/auth/drive']
     )
     return build('drive', 'v3', credentials=creds)
+
+def get_current_gemini_client():
+    global current_key_index, GEMINI_API_KEYS
+    if not GEMINI_API_KEYS:
+        raise ValueError("❌ Không tìm thấy GEMINI_API_KEY nào trong biến môi trường!")
+    key = GEMINI_API_KEYS[current_key_index]
+    print(f"🔑 Đang sử dụng Gemini API Key chỉ số [{current_key_index + 1}/{len(GEMINI_API_KEYS)}]")
+    return genai.Client(api_key=key)
+
+def switch_to_next_gemini_key():
+    global current_key_index, GEMINI_API_KEYS
+    if current_key_index + 1 < len(GEMINI_API_KEYS):
+        current_key_index += 1
+        print(f"🔄 Đã tự động đổi sang API Key tiếp theo: Key [{current_key_index + 1}/{len(GEMINI_API_KEYS)}]")
+        return True
+    else:
+        print("⚠️ Tất cả các API Key Gemini trong danh sách đều đã đụng trần hạn ngạch ngày (Daily Quota)!")
+        return False
 
 PROMPT_KHOA_HOC = """
 Bạn là một trợ lý phân tích dữ liệu khoa học / kỹ thuật chuyên nghiệp.
@@ -63,29 +82,59 @@ def is_matching_tags(file_name, folder_path_str):
             return True
     return False
 
-def call_gemini_with_retry(uploaded_file, prompt, max_retries=5):
-    """Gửi request tới Gemini API với cơ chế Retry khi gặp Quota / Server Busy"""
-    backoff_delays = [20, 40, 60, 90, 120]
+def call_gemini_with_retry(local_file_path, prompt, max_retries=3):
+    """Upload và gọi Gemini API với cơ chế tự động xoay vòng API Keys khi hết Hạn ngạch (Quota 429)"""
+    global current_key_index
     
-    for attempt in range(max_retries):
+    while True:
+        client = get_current_gemini_client()
+        uploaded_file = None
         try:
-            print(f"🤖 Đang gọi Gemini ({PRIMARY_MODEL}) - Thử lần {attempt + 1}/{max_retries}...")
+            # 1. Upload file tạm lên Gemini bằng Client hiện tại
+            uploaded_file = client.files.upload(file=local_file_path)
+            
+            # 2. Gọi Model Phân Tích
+            print(f"🤖 Đang gọi Gemini ({PRIMARY_MODEL}) trích xuất dữ liệu...")
             response = client.models.generate_content(
                 model=PRIMARY_MODEL,
                 contents=[uploaded_file, prompt],
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )
+            
+            # 3. Dọn dẹp file trên Gemini sau khi gọi xong
+            try:
+                client.files.delete(name=uploaded_file.name)
+            except Exception:
+                pass
+                
             return response
+
         except Exception as e:
             error_msg = str(e)
-            print(f"⚠️ Chi tiết lỗi API: {error_msg}")
-            if any(k in error_msg.lower() for k in ["429", "resource_exhausted", "quota", "503", "unavailable"]):
-                wait_time = backoff_delays[min(attempt, len(backoff_delays) - 1)]
-                print(f"⏳ Giới hạn Token/Rate Limit hoặc Server bận. Tạm dừng {wait_time} giây trước khi thử lại...")
-                time.sleep(wait_time)
+            print(f"⚠️ Chi tiết thông báo API: {error_msg}")
+            
+            # Xóa file vừa upload nếu lỗi
+            if uploaded_file is not None:
+                try:
+                    client.files.delete(name=uploaded_file.name)
+                except Exception:
+                    pass
+
+            # Nếu chạm trần Quota ngày (429 / RESOURCE_EXHAUSTED)
+            if any(k in error_msg.lower() for k in ["429", "resource_exhausted", "quota"]):
+                print("🛑 API Key hiện tại đã hết Hạn ngạch (Quota Exceeded).")
+                if switch_to_next_gemini_key():
+                    time.sleep(2)
+                    continue  # Thử lại ngay với Key mới
+                else:
+                    raise RuntimeError("❌ Đã hết toàn bộ API Keys khả dụng do chạm trần hạn ngạch ngày.")
+            
+            # Lỗi server tạm thời (503 / Unavailable)
+            elif any(k in error_msg.lower() for k in ["503", "unavailable"]):
+                print("⏳ Máy chủ Gemini bận, tạm dừng 20 giây...")
+                time.sleep(20)
             else:
                 raise e
-    raise RuntimeError(f"❌ Thất bại sau {max_retries} lần thử do vượt hạn ngạch API.")
 
 # 3. BƯỚC 1: QUÉT THƯ MỤC VÀ THU THẬP DANH SÁCH FILE CẦN XỬ LÝ
 def collect_all_files(service, folder_id, current_path="", collected_list=None):
@@ -118,7 +167,7 @@ def collect_all_files(service, folder_id, current_path="", collected_list=None):
             expected_json_v1 = f"{base_name}_PROCESSED_V1.json"
             
             if expected_json_v1 in json_files:
-                print(f"⏩ Bỏ qua (Đã xử lý trước đó): {file_name}")
+                print(f"⏩ Bỏ qua (Đã có file JSON kết quả): {file_name}")
                 continue
 
             collected_list.append({
@@ -159,20 +208,16 @@ def process_single_file(service, file_info):
     with open(local_file_path, 'wb') as f:
         f.write(file_bytes)
 
-    uploaded_file = None
     try:
-        # 2. Upload lên Gemini File API
-        uploaded_file = client.files.upload(file=local_file_path)
+        # 2. Upload & Phân tích bằng Gemini API (Tự xoay API Key nếu hết hạn ngạch)
+        response = call_gemini_with_retry(local_file_path, PROMPT_KHOA_HOC)
         
-        # 3. Phân tích tài liệu bằng Gemini 3.8 Flash
-        response = call_gemini_with_retry(uploaded_file, PROMPT_KHOA_HOC)
-        
-        # 4. Tạo nội dung JSON kết quả
+        # 3. Tạo nội dung JSON kết quả
         json_result = json.loads(response.text)
         json_result["metadata"]["file_hash_md5"] = current_file_hash
         json_result["metadata"]["original_filename"] = file_name
         
-        # 5. Ghi trực tiếp JSON kết quả lên Drive
+        # 4. Ghi trực tiếp JSON kết quả lên Drive (Đã giải quyết lỗi 403 Quota)
         json_bytes = io.BytesIO(json.dumps(json_result, ensure_ascii=False, indent=2).encode('utf-8'))
         media = MediaIoBaseUpload(json_bytes, mimetype='application/json', resumable=False)
         
@@ -194,18 +239,12 @@ def process_single_file(service, file_info):
         print(f"❌ Thất bại khi xử lý file {file_name}: {str(e)}")
     
     finally:
-        # 6. Dọn dẹp tài nguyên dứt điểm sau mỗi file
-        if uploaded_file is not None:
-            try:
-                client.files.delete(name=uploaded_file.name)
-            except Exception:
-                pass
-
+        # 5. Dọn dẹp file tạm local dứt điểm
         if os.path.exists(local_file_path):
             os.remove(local_file_path)
 
-        # Nghỉ 10 giây giữa các file để reset hạn ngạch Token
-        time.sleep(10)
+        # Nghỉ ngắn 3 giây giữa các file
+        time.sleep(3)
 
 def main():
     service = get_drive_service()
