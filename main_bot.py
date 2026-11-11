@@ -16,7 +16,7 @@ SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
 TARGET_TAGS = os.environ.get("TARGET_TAGS", "").split(",") if os.environ.get("TARGET_TAGS") else []
 
 ALLOWED_EXTENSIONS = ('.pdf', '.docx', '.xlsx', '.xls', '.png', '.jpg', '.jpeg')
-PRIMARY_MODEL = "gemini-2.5-flash"  # Model chuẩn khả dụng trên SDK Google GenAI v1
+PRIMARY_MODEL = "gemini-3.8-flash"  # Bắt buộc sử dụng gemini-3.8-flash
 
 # 2. KHỞI TẠO CLIENTS
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -64,7 +64,7 @@ def is_matching_tags(file_name, folder_path_str):
     return False
 
 def call_gemini_with_retry(uploaded_file, prompt, max_retries=5):
-    """Gửi request tới Gemini API với cơ chế Retry khi chạm trần Quota"""
+    """Gửi request tới Gemini API (gemini-3.8-flash) với cơ chế Retry khi chạm trần Quota"""
     backoff_delays = [15, 30, 45, 60, 90]
     
     for attempt in range(max_retries):
@@ -167,7 +167,6 @@ def scan_and_process_folder(service, folder_id, current_path=""):
                 if os.path.exists(local_file_path):
                     os.remove(local_file_path)
 
-                # Nghỉ ngắn giữa các file để tránh đụng trần Rate Limit liên tục
                 time.sleep(3)
 
             except Exception as e:
