@@ -5,9 +5,10 @@ import json
 import io
 import time
 import hashlib
-import pypdf
+import fitz  # PyMuPDF: trích xuất văn bản & nén ảnh trang PDF scan
 import docx
 import openpyxl
+from PIL import Image
 from google import genai
 from google.genai import types
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
@@ -17,36 +18,44 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 # ==============================================================================
-# 1. BIẾN MÔI TRƯỜNG & SECRETS
+# 1. BIẾN MÔI TRƯỜNG & CẤU HÌNH TÁCH BIỆT 2 TÀI KHOẢN (DRIVE vs GEMINI)
 # ==============================================================================
+# Tài khoản B (Tài khoản Gemini đề xuất để xử lý AI)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+
+# Tài khoản A (Tài khoản Google Drive chứa thư mục THU_VIEN_SAN_PHAM)
 DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "").strip()
 OAUTH_TOKEN_JSON = os.environ.get("OAUTH_TOKEN_JSON", "").strip()
 SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON", "").strip()
+
 TARGET_TAGS = [t.strip() for t in os.environ.get("TARGET_TAGS", "").split(",") if t.strip()]
-
 ALLOWED_EXTENSIONS = ('.pdf', '.docx', '.xlsx', '.xls', '.png', '.jpg', '.jpeg')
-MODEL_PRIORITY_LIST = ['gemini-3.8-flash', 'gemini-3.8-flash-lite', 'gemini-3.8-pro']
+GEMINI_MODEL = 'gemini-3.8-flash'
 
 # ==============================================================================
-# 2. KHỞI TẠO CLIENTS & PROMPT CHUẨN HÓA
+# 2. KHỞI TẠO CLIENTS ĐỘC LẬP & PROMPT CHUẨN HÓA
 # ==============================================================================
-client = genai.Client(api_key=GEMINI_API_KEY)
+def get_gemini_client():
+    if not GEMINI_API_KEY:
+        raise ValueError("Thiếu GEMINI_API_KEY của tài khoản Gemini đề xuất trong GitHub Secrets.")
+    masked_key = f"{GEMINI_API_KEY[:8]}...{GEMINI_API_KEY[-4:]}"
+    print(f"🧠 Khởi tạo Gemini Client bằng tài khoản đề xuất (API Key: {masked_key}) | Model: {GEMINI_MODEL}")
+    return genai.Client(api_key=GEMINI_API_KEY)
 
 
 def get_drive_service():
     scopes = ['https://www.googleapis.com/auth/drive']
 
     if OAUTH_TOKEN_JSON:
-        print("🔐 Đang xác thực Google Drive bằng OAUTH_TOKEN_JSON...")
+        print("🔐 Đang kết nối Google Drive (Kho dữ liệu) bằng OAUTH_TOKEN_JSON...")
         token_info = json.loads(OAUTH_TOKEN_JSON)
         creds = UserCredentials.from_authorized_user_info(token_info, scopes)
         creds.refresh(Request())
-        print("✅ Xác thực OAuth User Token thành công!")
+        print("✅ Xác thực tài khoản Google Drive thành công!")
         return build('drive', 'v3', credentials=creds)
 
     if SERVICE_ACCOUNT_JSON:
-        print("🔑 Đang xác thực Google Drive bằng SERVICE_ACCOUNT_JSON...")
+        print("🔑 Đang kết nối Google Drive bằng SERVICE_ACCOUNT_JSON...")
         sa_info = json.loads(SERVICE_ACCOUNT_JSON)
         sa_info["token_uri"] = "https://oauth2.googleapis.com/token"
         creds = ServiceAccountCredentials.from_service_account_info(sa_info, scopes=scopes)
@@ -96,128 +105,135 @@ def is_matching_tags(file_name, folder_path_str):
 
 
 # ==============================================================================
-# 3. TRÍCH XUẤT VĂN BẢN THÔNG MINH (CHỐNG LỖI 429 TRÀN TOKEN VỚI FILE PDF LỚN)
+# 3. TIỀN XỬ LÝ TÀI LIỆU THÔNG MINH (CHỐNG LỖI 429 TRÀN TOKEN)
 # ==============================================================================
-def extract_and_prioritize_text(file_bytes, file_ext, max_chars=350000):
-    pages_text = []
-    try:
-        if file_ext == '.pdf':
-            reader = pypdf.PdfReader(io.BytesIO(file_bytes))
-            for idx, page in enumerate(reader.pages):
-                txt = page.extract_text() or ""
-                if txt.strip():
-                    pages_text.append((idx + 1, f"--- TRANG {idx + 1} ---\n{txt}"))
-        elif file_ext == '.docx':
-            doc = docx.Document(io.BytesIO(file_bytes))
-            block = []
-            for para in doc.paragraphs:
-                if para.text.strip():
-                    block.append(para.text)
-            for table in doc.tables:
-                for row in table.rows:
-                    block.append(" | ".join(c.text.strip().replace('\n', ' ') for c in row.cells))
-            if block:
-                pages_text.append((1, "\n".join(block)))
-        elif file_ext in ('.xlsx', '.xls'):
-            wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
-            for idx, sheet in enumerate(wb.sheetnames):
-                ws = wb[sheet]
-                rows = [f"=== SHEET: {sheet} ==="]
-                for row in ws.iter_rows(values_only=True):
-                    if any(row):
-                        rows.append(" | ".join(str(v).strip() if v is not None else "" for v in row))
-                pages_text.append((idx + 1, "\n".join(rows)))
-    except Exception:
-        return ""
-
-    full_text = "\n".join(p[1] for p in pages_text).strip()
-    if len(full_text) <= 500:
-        return ""
-
-    if len(full_text) <= max_chars:
-        return full_text
-
+def build_gemini_payload(file_bytes, file_name):
+    file_ext = os.path.splitext(file_name)[1].lower()
     spec_keywords = re.compile(
         r"(specification|thông số|kích thước|dimension|weight|trọng lượng|power|nguồn điện|voltage|"
         r"resolution|độ phân giải|compatible|tương thích|operating|môi trường|rating|model|appendix|phụ lục)",
         re.IGNORECASE
     )
-    selected = []
-    current_len = 0
-    head_limit = int(max_chars * 0.25)
 
-    for _, content in pages_text:
-        if current_len < head_limit:
-            selected.append(content)
-            current_len += len(content)
-        elif spec_keywords.search(content) and current_len + len(content) <= max_chars:
-            selected.append(content)
-            current_len += len(content)
+    if file_ext == '.docx':
+        doc = docx.Document(io.BytesIO(file_bytes))
+        lines = [p.text for p in doc.paragraphs if p.text.strip()]
+        for table in doc.tables:
+            for row in table.rows:
+                lines.append(" | ".join(c.text.strip().replace('\n', ' ') for c in row.cells))
+        text = "\n".join(lines)[:120000]
+        print(f"⚡ Đã trích xuất văn bản Word ({len(text):,} ký tự).")
+        return [f"TÊN FILE: {file_name}\n\n{text}", PROMPT_KHOA_HOC]
 
-    return "\n".join(selected)
+    if file_ext in ('.xlsx', '.xls'):
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+        lines = []
+        for sheet in wb.sheetnames:
+            ws = wb[sheet]
+            lines.append(f"=== SHEET: {sheet} ===")
+            for row in ws.iter_rows(values_only=True):
+                if any(row):
+                    lines.append(" | ".join(str(v).strip() if v is not None else "" for v in row))
+        text = "\n".join(lines)[:120000]
+        print(f"⚡ Đã trích xuất dữ liệu Excel ({len(text):,} ký tự).")
+        return [f"TÊN FILE: {file_name}\n\n{text}", PROMPT_KHOA_HOC]
 
+    if file_ext in ('.png', '.jpg', '.jpeg'):
+        img = Image.open(io.BytesIO(file_bytes)).convert("RGB")
+        img.thumbnail((1600, 1600))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=80)
+        print(f"🖼️ Đã tối ưu kích thước ảnh ({len(buf.getvalue()) // 1024} KB).")
+        return [
+            types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"),
+            f"TÊN FILE: {file_name}",
+            PROMPT_KHOA_HOC
+        ]
 
-def generate_structured_json(file_bytes, file_name):
-    file_ext = os.path.splitext(file_name)[1].lower()
-    extracted_text = extract_and_prioritize_text(file_bytes, file_ext)
+    if file_ext == '.pdf':
+        pdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
+        total_pages = len(pdf_doc)
+        pages_text = []
+        for idx, page in enumerate(pdf_doc):
+            txt = page.get_text("text") or ""
+            if txt.strip():
+                pages_text.append((idx, f"--- TRANG {idx + 1} ---\n{txt}"))
 
-    uploaded_file = None
-    local_file_path = None
+        full_text = "\n".join(p[1] for p in pages_text).strip()
 
-    try:
-        if extracted_text:
-            print(f"⚡ Đã trích xuất văn bản sạch ({len(extracted_text):,} ký tự) -> Gửi trực tiếp siêu tốc.")
-            contents_payload = [f"TÊN FILE GỐC: {file_name}\n\nNỘI DUNG TÀI LIỆU:\n{extracted_text}", PROMPT_KHOA_HOC]
+        if len(full_text) > 400:
+            max_chars = 120000
+            if len(full_text) <= max_chars:
+                selected_text = full_text
+            else:
+                selected = []
+                cur_len = 0
+                head_limit = int(max_chars * 0.3)
+                for _, content in pages_text:
+                    if cur_len < head_limit:
+                        selected.append(content)
+                        cur_len += len(content)
+                    elif spec_keywords.search(content) and cur_len + len(content) <= max_chars:
+                        selected.append(content)
+                        cur_len += len(content)
+                selected_text = "\n".join(selected)
+            print(f"⚡ Đã trích xuất văn bản PDF ({len(selected_text):,} ký tự / {total_pages} trang).")
+            return [f"TÊN FILE: {file_name}\n\n{selected_text}", PROMPT_KHOA_HOC]
+
+        print(f"🖼️ PDF dạng hình ảnh/scan ({total_pages} trang) -> Nén ảnh tối ưu token...")
+        if total_pages <= 8:
+            target_indices = list(range(total_pages))
         else:
-            print("📦 Tài liệu dạng Scan/Hình ảnh -> Tải qua Gemini Files API...")
-            local_file_path = f"temp_{hashlib.md5(file_name.encode()).hexdigest()}{file_ext}"
-            with open(local_file_path, 'wb') as f:
-                f.write(file_bytes)
-            uploaded_file = client.files.upload(file=local_file_path)
-            contents_payload = [uploaded_file, PROMPT_KHOA_HOC]
+            target_indices = sorted(list(set([0, 1, 2] + list(range(max(3, total_pages - 5), total_pages)))))
 
-        for model_name in MODEL_PRIORITY_LIST:
-            backoff_delays = [15, 30, 60]
-            for attempt in range(len(backoff_delays) + 1):
-                try:
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=contents_payload,
-                        config=types.GenerateContentConfig(
-                            response_mime_type="application/json",
-                            temperature=0.1
-                        )
-                    )
-                    return json.loads(response.text)
-                except Exception as e:
-                    err_msg = str(e)
-                    if "404" in err_msg or "NOT_FOUND" in err_msg:
-                        print(f"⚠️ Model {model_name} báo 404, chuyển sang model dự phòng...")
-                        break
-                    if ("429" in err_msg or "503" in err_msg or "RESOURCE_EXHAUSTED" in err_msg) and attempt < len(backoff_delays):
-                        wait_sec = backoff_delays[attempt]
-                        print(f"⚠️ Model {model_name} quá tải (lần {attempt + 1}/{len(backoff_delays)}), chờ {wait_sec}s...")
-                        time.sleep(wait_sec)
-                    else:
-                        print(f"⚠️ Lỗi trên {model_name}: {err_msg[:180]}")
-                        break
+        parts = [f"TÊN FILE: {file_name} (Trích xuất {len(target_indices)}/{total_pages} trang trọng tâm)"]
+        total_img_kb = 0
+        for p_idx in target_indices:
+            pix = pdf_doc[p_idx].get_pixmap(dpi=120)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            img.thumbnail((1400, 1400))
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=75)
+            img_bytes = buf.getvalue()
+            total_img_kb += len(img_bytes) // 1024
+            parts.append(types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
 
-        raise RuntimeError("Tất cả các mô hình Gemini thế hệ 3.8 đều quá tải hoặc bị gián đoạn.")
+        parts.append(PROMPT_KHOA_HOC)
+        print(f"📦 Đã đóng gói {len(target_indices)} trang ảnh siêu nhẹ (Tổng: {total_img_kb} KB).")
+        return parts
 
-    finally:
-        if uploaded_file:
-            try:
-                client.files.delete(name=uploaded_file.name)
-            except Exception:
-                pass
-        if local_file_path and os.path.exists(local_file_path):
-            os.remove(local_file_path)
+    raise ValueError(f"Định dạng file không được hỗ trợ: {file_ext}")
+
+
+def generate_structured_json(gemini_client, file_bytes, file_name):
+    contents_payload = build_gemini_payload(file_bytes, file_name)
+    backoff_delays = [20, 45, 70]
+
+    for attempt in range(len(backoff_delays) + 1):
+        try:
+            response = gemini_client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=contents_payload,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1
+                )
+            )
+            return json.loads(response.text)
+        except Exception as e:
+            err_msg = str(e)
+            if ("429" in err_msg or "503" in err_msg or "RESOURCE_EXHAUSTED" in err_msg) and attempt < len(backoff_delays):
+                wait_sec = backoff_delays[attempt]
+                print(f"⚠️ Model {GEMINI_MODEL} chạm giới hạn tốc độ (lần {attempt + 1}/{len(backoff_delays)}), chờ {wait_sec}s...")
+                time.sleep(wait_sec)
+            else:
+                raise RuntimeError(f"Lỗi gọi {GEMINI_MODEL}: {err_msg}")
 
 
 # ==============================================================================
 # 4. QUÉT ĐỆ QUY VÀ TRÍCH XUẤT DỮ LIỆU
 # ==============================================================================
-def scan_and_process_folder(service, folder_id, current_path="", stats=None):
+def scan_and_process_folder(drive_service, gemini_client, folder_id, current_path="", stats=None):
     if stats is None:
         stats = {"success": 0, "skipped": 0, "failed": 0}
 
@@ -225,7 +241,7 @@ def scan_and_process_folder(service, folder_id, current_path="", stats=None):
     items = []
     while True:
         query = f"'{folder_id}' in parents and trashed = false"
-        results = service.files().list(
+        results = drive_service.files().list(
             q=query,
             fields="nextPageToken, files(id, name, mimeType, md5Checksum)",
             supportsAllDrives=True,
@@ -245,7 +261,7 @@ def scan_and_process_folder(service, folder_id, current_path="", stats=None):
         mime_type = item['mimeType']
 
         if mime_type == 'application/vnd.google-apps.folder':
-            scan_and_process_folder(service, file_id, f"{current_path}/{file_name}", stats)
+            scan_and_process_folder(drive_service, gemini_client, file_id, f"{current_path}/{file_name}", stats)
 
         elif file_name.lower().endswith(ALLOWED_EXTENSIONS):
             if not is_matching_tags(file_name, current_path):
@@ -263,7 +279,7 @@ def scan_and_process_folder(service, folder_id, current_path="", stats=None):
             print(f"📂 Vị trí: {current_path if current_path else 'Thư mục gốc'}")
 
             try:
-                request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+                request = drive_service.files().get_media(fileId=file_id, supportsAllDrives=True)
                 file_stream = io.BytesIO()
                 downloader = MediaIoBaseDownload(file_stream, request)
                 done = False
@@ -274,21 +290,21 @@ def scan_and_process_folder(service, folder_id, current_path="", stats=None):
                 current_file_hash = calculate_md5(file_bytes)
                 print(f"🔑 Mã Hash MD5: {current_file_hash}")
 
-                json_result = generate_structured_json(file_bytes, file_name)
+                json_result = generate_structured_json(gemini_client, file_bytes, file_name)
                 if "metadata" not in json_result or not isinstance(json_result["metadata"], dict):
                     json_result["metadata"] = {}
                 json_result["metadata"]["file_hash_md5"] = current_file_hash
                 json_result["metadata"]["original_filename"] = file_name
 
                 json_bytes = io.BytesIO(json.dumps(json_result, ensure_ascii=False, indent=2).encode('utf-8'))
-                media = MediaIoBaseUpload(json_bytes, mimetype='application/json', resumable=True)
+                media = MediaIoBaseUpload(json_bytes, mimetype='application/json', resumable=False)
 
                 file_metadata = {
                     'name': expected_json_v1,
                     'parents': [folder_id]
                 }
 
-                service.files().create(
+                drive_service.files().create(
                     body=file_metadata,
                     media_body=media,
                     fields='id',
@@ -297,7 +313,7 @@ def scan_and_process_folder(service, folder_id, current_path="", stats=None):
 
                 print(f"✅ Đã tạo file JSON thành công: {expected_json_v1}")
                 stats["success"] += 1
-                time.sleep(4)
+                time.sleep(10)
 
             except Exception as e:
                 print(f"❌ Lỗi xử lý file {file_name}: {str(e)}")
@@ -307,18 +323,19 @@ def scan_and_process_folder(service, folder_id, current_path="", stats=None):
 
 
 def main():
-    if not GEMINI_API_KEY or not DRIVE_FOLDER_ID:
-        print("❌ Lỗi cấu hình: Thiếu GEMINI_API_KEY hoặc DRIVE_FOLDER_ID.")
+    if not DRIVE_FOLDER_ID:
+        print("❌ Lỗi cấu hình: Thiếu DRIVE_FOLDER_ID trong GitHub Secrets.")
         sys.exit(1)
 
-    service = get_drive_service()
-    print(f"🤖 Danh sách Mô hình Ưu tiên: {MODEL_PRIORITY_LIST}")
+    gemini_client = get_gemini_client()
+    drive_service = get_drive_service()
+
     if TARGET_TAGS:
         print(f"🔍 Đang chạy chế độ lọc theo từ khóa: {TARGET_TAGS}")
     else:
         print("🌐 Đang chạy chế độ quét toàn bộ thư viện THU_VIEN_SAN_PHAM...")
 
-    stats = scan_and_process_folder(service, DRIVE_FOLDER_ID)
+    stats = scan_and_process_folder(drive_service, gemini_client, DRIVE_FOLDER_ID)
 
     print("\n📊 BÁO CÁO TỔNG KẾT VẬN HÀNH:")
     print(f"   ✔️ Thành công: {stats['success']}")
