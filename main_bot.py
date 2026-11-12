@@ -1,11 +1,10 @@
 import os
 import sys
-import re
 import json
 import io
 import time
 import hashlib
-import fitz  # PyMuPDF: trích xuất văn bản & nén ảnh trang PDF scan
+import pymupdf  # PyMuPDF: trích xuất toàn bộ văn bản & nén ảnh trang PDF scan
 import docx
 import openpyxl
 from PIL import Image
@@ -20,8 +19,9 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 # ==============================================================================
 # 1. BIẾN MÔI TRƯỜNG & CẤU HÌNH TÁCH BIỆT 2 TÀI KHOẢN (DRIVE vs GEMINI)
 # ==============================================================================
-# Tài khoản B (Tài khoản Gemini đề xuất để xử lý AI)
+# Tài khoản B (Tài khoản Gemini đề xuất để xử lý AI - hỗ trợ xoay vòng nhiều key)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+GEMINI_API_KEYS = os.environ.get("GEMINI_API_KEYS", "").strip()
 
 # Tài khoản A (Tài khoản Google Drive chứa thư mục THU_VIEN_SAN_PHAM)
 DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "").strip()
@@ -32,15 +32,30 @@ TARGET_TAGS = [t.strip() for t in os.environ.get("TARGET_TAGS", "").split(",") i
 ALLOWED_EXTENSIONS = ('.pdf', '.docx', '.xlsx', '.xls', '.png', '.jpg', '.jpeg')
 GEMINI_MODEL = 'gemini-3.8-flash'
 
+
+def build_api_key_pool():
+    keys = []
+    if GEMINI_API_KEYS:
+        keys.extend([k.strip() for k in GEMINI_API_KEYS.split(",") if k.strip()])
+    if GEMINI_API_KEY and GEMINI_API_KEY not in keys:
+        keys.insert(0, GEMINI_API_KEY)
+    return keys
+
+
+API_KEY_POOL = build_api_key_pool()
+CURRENT_KEY_IDX = 0
+
 # ==============================================================================
 # 2. KHỞI TẠO CLIENTS ĐỘC LẬP & PROMPT CHUẨN HÓA
 # ==============================================================================
 def get_gemini_client():
-    if not GEMINI_API_KEY:
+    if not API_KEY_POOL:
         raise ValueError("Thiếu GEMINI_API_KEY của tài khoản Gemini đề xuất trong GitHub Secrets.")
-    masked_key = f"{GEMINI_API_KEY[:8]}...{GEMINI_API_KEY[-4:]}"
-    print(f"🧠 Khởi tạo Gemini Client bằng tài khoản đề xuất (API Key: {masked_key}) | Model: {GEMINI_MODEL}")
-    return genai.Client(api_key=GEMINI_API_KEY)
+    active_key = API_KEY_POOL[CURRENT_KEY_IDX]
+    masked_key = f"{active_key[:8]}...{active_key[-4:]}"
+    pool_info = f" | Key {CURRENT_KEY_IDX + 1}/{len(API_KEY_POOL)}" if len(API_KEY_POOL) > 1 else ""
+    print(f"🧠 Khởi tạo Gemini Client bằng tài khoản đề xuất (API Key: {masked_key}{pool_info}) | Model: {GEMINI_MODEL}")
+    return genai.Client(api_key=active_key)
 
 
 def get_drive_service():
@@ -68,7 +83,7 @@ def get_drive_service():
 
 PROMPT_KHOA_HOC = """
 Bạn là một trợ lý phân tích dữ liệu khoa học / kỹ thuật chuyên nghiệp.
-Hãy phân tích tài liệu được cung cấp và trích xuất thông tin theo cấu trúc JSON chuẩn sau:
+Hãy phân tích TOÀN BỘ tài liệu được cung cấp và trích xuất đầy đủ thông tin theo cấu trúc JSON chuẩn sau:
 
 {
   "metadata": {
@@ -105,15 +120,10 @@ def is_matching_tags(file_name, folder_path_str):
 
 
 # ==============================================================================
-# 3. TIỀN XỬ LÝ TÀI LIỆU THÔNG MINH (CHỐNG LỖI 429 TRÀN TOKEN)
+# 3. TRÍCH XUẤT 100% DỮ LIỆU TÀI LIỆU
 # ==============================================================================
 def build_gemini_payload(file_bytes, file_name):
     file_ext = os.path.splitext(file_name)[1].lower()
-    spec_keywords = re.compile(
-        r"(specification|thông số|kích thước|dimension|weight|trọng lượng|power|nguồn điện|voltage|"
-        r"resolution|độ phân giải|compatible|tương thích|operating|môi trường|rating|model|appendix|phụ lục)",
-        re.IGNORECASE
-    )
 
     if file_ext == '.docx':
         doc = docx.Document(io.BytesIO(file_bytes))
@@ -121,9 +131,9 @@ def build_gemini_payload(file_bytes, file_name):
         for table in doc.tables:
             for row in table.rows:
                 lines.append(" | ".join(c.text.strip().replace('\n', ' ') for c in row.cells))
-        text = "\n".join(lines)[:120000]
-        print(f"⚡ Đã trích xuất văn bản Word ({len(text):,} ký tự).")
-        return [f"TÊN FILE: {file_name}\n\n{text}", PROMPT_KHOA_HOC]
+        full_text = "\n".join(lines)
+        print(f"⚡ Đã trích xuất 100% văn bản Word ({len(full_text):,} ký tự).")
+        return [f"TÊN FILE: {file_name}\n\n{full_text}", PROMPT_KHOA_HOC]
 
     if file_ext in ('.xlsx', '.xls'):
         wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
@@ -134,9 +144,9 @@ def build_gemini_payload(file_bytes, file_name):
             for row in ws.iter_rows(values_only=True):
                 if any(row):
                     lines.append(" | ".join(str(v).strip() if v is not None else "" for v in row))
-        text = "\n".join(lines)[:120000]
-        print(f"⚡ Đã trích xuất dữ liệu Excel ({len(text):,} ký tự).")
-        return [f"TÊN FILE: {file_name}\n\n{text}", PROMPT_KHOA_HOC]
+        full_text = "\n".join(lines)
+        print(f"⚡ Đã trích xuất 100% dữ liệu Excel ({len(full_text):,} ký tự, {len(wb.sheetnames)} sheet).")
+        return [f"TÊN FILE: {file_name}\n\n{full_text}", PROMPT_KHOA_HOC]
 
     if file_ext in ('.png', '.jpg', '.jpeg'):
         img = Image.open(io.BytesIO(file_bytes)).convert("RGB")
@@ -151,44 +161,24 @@ def build_gemini_payload(file_bytes, file_name):
         ]
 
     if file_ext == '.pdf':
-        pdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
+        pdf_doc = pymupdf.open(stream=file_bytes, filetype="pdf")
         total_pages = len(pdf_doc)
         pages_text = []
         for idx, page in enumerate(pdf_doc):
             txt = page.get_text("text") or ""
             if txt.strip():
-                pages_text.append((idx, f"--- TRANG {idx + 1} ---\n{txt}"))
+                pages_text.append(f"--- TRANG {idx + 1} ---\n{txt}")
 
-        full_text = "\n".join(p[1] for p in pages_text).strip()
+        full_text = "\n".join(pages_text).strip()
 
         if len(full_text) > 400:
-            max_chars = 120000
-            if len(full_text) <= max_chars:
-                selected_text = full_text
-            else:
-                selected = []
-                cur_len = 0
-                head_limit = int(max_chars * 0.3)
-                for _, content in pages_text:
-                    if cur_len < head_limit:
-                        selected.append(content)
-                        cur_len += len(content)
-                    elif spec_keywords.search(content) and cur_len + len(content) <= max_chars:
-                        selected.append(content)
-                        cur_len += len(content)
-                selected_text = "\n".join(selected)
-            print(f"⚡ Đã trích xuất văn bản PDF ({len(selected_text):,} ký tự / {total_pages} trang).")
-            return [f"TÊN FILE: {file_name}\n\n{selected_text}", PROMPT_KHOA_HOC]
+            print(f"⚡ Đã trích xuất 100% văn bản PDF ({len(full_text):,} ký tự / {total_pages} trang).")
+            return [f"TÊN FILE: {file_name}\n\n{full_text}", PROMPT_KHOA_HOC]
 
-        print(f"🖼️ PDF dạng hình ảnh/scan ({total_pages} trang) -> Nén ảnh tối ưu token...")
-        if total_pages <= 8:
-            target_indices = list(range(total_pages))
-        else:
-            target_indices = sorted(list(set([0, 1, 2] + list(range(max(3, total_pages - 5), total_pages)))))
-
-        parts = [f"TÊN FILE: {file_name} (Trích xuất {len(target_indices)}/{total_pages} trang trọng tâm)"]
+        print(f"🖼️ PDF dạng hình ảnh/scan ({total_pages} trang) -> Nén toàn bộ 100% số trang...")
+        parts = [f"TÊN FILE: {file_name} (Đầy đủ {total_pages}/{total_pages} trang)"]
         total_img_kb = 0
-        for p_idx in target_indices:
+        for p_idx in range(total_pages):
             pix = pdf_doc[p_idx].get_pixmap(dpi=120)
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             img.thumbnail((1400, 1400))
@@ -199,43 +189,64 @@ def build_gemini_payload(file_bytes, file_name):
             parts.append(types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
 
         parts.append(PROMPT_KHOA_HOC)
-        print(f"📦 Đã đóng gói {len(target_indices)} trang ảnh siêu nhẹ (Tổng: {total_img_kb} KB).")
+        print(f"📦 Đã đóng gói toàn bộ {total_pages} trang ảnh (Tổng: {total_img_kb} KB).")
         return parts
 
     raise ValueError(f"Định dạng file không được hỗ trợ: {file_ext}")
 
 
-def generate_structured_json(gemini_client, file_bytes, file_name):
+def generate_structured_json(client_holder, file_bytes, file_name):
+    global CURRENT_KEY_IDX
     contents_payload = build_gemini_payload(file_bytes, file_name)
     backoff_delays = [20, 45, 70]
 
-    for attempt in range(len(backoff_delays) + 1):
-        try:
-            response = gemini_client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=contents_payload,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.1
+    while CURRENT_KEY_IDX < len(API_KEY_POOL):
+        for attempt in range(len(backoff_delays) + 1):
+            try:
+                response = client_holder["client"].models.generate_content(
+                    model=GEMINI_MODEL,
+                    contents=contents_payload,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.1
+                    )
                 )
-            )
-            return json.loads(response.text)
-        except Exception as e:
-            err_msg = str(e)
-            if ("429" in err_msg or "503" in err_msg or "RESOURCE_EXHAUSTED" in err_msg) and attempt < len(backoff_delays):
-                wait_sec = backoff_delays[attempt]
-                print(f"⚠️ Model {GEMINI_MODEL} chạm giới hạn tốc độ (lần {attempt + 1}/{len(backoff_delays)}), chờ {wait_sec}s...")
-                time.sleep(wait_sec)
-            else:
-                raise RuntimeError(f"Lỗi gọi {GEMINI_MODEL}: {err_msg}")
+                return json.loads(response.text)
+            except Exception as e:
+                err_msg = str(e)
+                is_quota_429 = ("429" in err_msg) or ("RESOURCE_EXHAUSTED" in err_msg)
+                is_daily_limit = ("PerDay" in err_msg) or ("per day" in err_msg.lower())
+
+                if is_quota_429 and is_daily_limit:
+                    print(f"🛑 API Key #{CURRENT_KEY_IDX + 1} đã hết hạn mức NGÀY (Free Tier Daily Limit).")
+                    if CURRENT_KEY_IDX + 1 < len(API_KEY_POOL):
+                        CURRENT_KEY_IDX += 1
+                        print(f"🔄 Đang chuyển sang API Key dự phòng #{CURRENT_KEY_IDX + 1}...")
+                        client_holder["client"] = get_gemini_client()
+                        break
+                    else:
+                        raise RuntimeError(
+                            f"Hết hạn mức ngày của {GEMINI_MODEL} (Free Tier giới hạn 20 request/ngày). "
+                            f"Chi tiết: {err_msg}"
+                        )
+
+                if (is_quota_429 or "503" in err_msg) and attempt < len(backoff_delays):
+                    wait_sec = backoff_delays[attempt]
+                    print(f"⚠️ Model {GEMINI_MODEL} chạm giới hạn tốc độ (lần {attempt + 1}/{len(backoff_delays)}), chờ {wait_sec}s...")
+                    time.sleep(wait_sec)
+                else:
+                    raise RuntimeError(f"Lỗi gọi {GEMINI_MODEL}: {err_msg}")
 
 
 # ==============================================================================
 # 4. QUÉT ĐỆ QUY VÀ TRÍCH XUẤT DỮ LIỆU
 # ==============================================================================
-def scan_and_process_folder(drive_service, gemini_client, folder_id, current_path="", stats=None):
+def scan_and_process_folder(drive_service, client_holder, folder_id, current_path="", stats=None):
     if stats is None:
-        stats = {"success": 0, "skipped": 0, "failed": 0}
+        stats = {"success": 0, "skipped": 0, "failed": 0, "quota_exhausted": False}
+
+    if stats.get("quota_exhausted"):
+        return stats
 
     page_token = None
     items = []
@@ -256,12 +267,15 @@ def scan_and_process_folder(drive_service, gemini_client, folder_id, current_pat
     json_files = {f['name'] for f in items if f['name'].endswith('.json')}
 
     for item in items:
+        if stats.get("quota_exhausted"):
+            break
+
         file_id = item['id']
         file_name = item['name']
         mime_type = item['mimeType']
 
         if mime_type == 'application/vnd.google-apps.folder':
-            scan_and_process_folder(drive_service, gemini_client, file_id, f"{current_path}/{file_name}", stats)
+            scan_and_process_folder(drive_service, client_holder, file_id, f"{current_path}/{file_name}", stats)
 
         elif file_name.lower().endswith(ALLOWED_EXTENSIONS):
             if not is_matching_tags(file_name, current_path):
@@ -290,7 +304,7 @@ def scan_and_process_folder(drive_service, gemini_client, folder_id, current_pat
                 current_file_hash = calculate_md5(file_bytes)
                 print(f"🔑 Mã Hash MD5: {current_file_hash}")
 
-                json_result = generate_structured_json(gemini_client, file_bytes, file_name)
+                json_result = generate_structured_json(client_holder, file_bytes, file_name)
                 if "metadata" not in json_result or not isinstance(json_result["metadata"], dict):
                     json_result["metadata"] = {}
                 json_result["metadata"]["file_hash_md5"] = current_file_hash
@@ -315,6 +329,13 @@ def scan_and_process_folder(drive_service, gemini_client, folder_id, current_pat
                 stats["success"] += 1
                 time.sleep(10)
 
+            except RuntimeError as e:
+                err_text = str(e)
+                print(f"❌ Lỗi xử lý file {file_name}: {err_text}")
+                stats["failed"] += 1
+                if "Hết hạn mức ngày" in err_text:
+                    stats["quota_exhausted"] = True
+                    break
             except Exception as e:
                 print(f"❌ Lỗi xử lý file {file_name}: {str(e)}")
                 stats["failed"] += 1
@@ -327,7 +348,7 @@ def main():
         print("❌ Lỗi cấu hình: Thiếu DRIVE_FOLDER_ID trong GitHub Secrets.")
         sys.exit(1)
 
-    gemini_client = get_gemini_client()
+    client_holder = {"client": get_gemini_client()}
     drive_service = get_drive_service()
 
     if TARGET_TAGS:
@@ -335,7 +356,7 @@ def main():
     else:
         print("🌐 Đang chạy chế độ quét toàn bộ thư viện THU_VIEN_SAN_PHAM...")
 
-    stats = scan_and_process_folder(drive_service, gemini_client, DRIVE_FOLDER_ID)
+    stats = scan_and_process_folder(drive_service, client_holder, DRIVE_FOLDER_ID)
 
     print("\n📊 BÁO CÁO TỔNG KẾT VẬN HÀNH:")
     print(f"   ✔️ Thành công: {stats['success']}")
