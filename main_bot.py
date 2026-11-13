@@ -32,8 +32,7 @@ KEYWORDS = [
     "Bồn oxy lỏng", "Oxy trung tâm"
 ]
 
-# Từ khóa bao quát để bắt cả những KHLCNT đặt tên chung (VD: "Mua sắm trang thiết bị y tế năm 2026")
-BROAD_MEDICAL_QUERIES = [
+BROAD_QUERIES = [
     "thiết bị y tế", "trang thiết bị y tế", "bệnh viện",
     "trung tâm y tế", "sở y tế", "vật tư y tế"
 ]
@@ -81,9 +80,11 @@ BASE_DOMAIN = "muasamcong.mof.gov.vn"
 PRIMARY_MODEL = "gemini-3.8-flash"
 FALLBACK_MODEL = "gemini-2.5-flash"
 
-# Quét tối đa 5 trang x 100 bản ghi = 500 bản ghi / nhóm truy vấn để không bỏ sót dữ liệu
-MAX_PAGES_PER_QUERY = 5
-PAGE_SIZE = 100
+# Phân tầng giới hạn quét:
+# - Từ khóa sản phẩm cụ thể: tối đa 150 bản ghi / nhóm trường (Trang 0: 100, Trang 1: 50)
+# - Từ khóa chung để mở danh mục gói thầu chi tiết: tối đa 500 bản ghi / nhóm trường (5 trang x 100)
+SPECIFIC_MAX_RECORDS = 150
+BROAD_MAX_RECORDS = 500
 
 BID_FORM_MAP = {
     "DTRR": "Đấu thầu rộng rãi",
@@ -244,7 +245,7 @@ def build_khlcnt_detail_url(plan_id):
     )
 
 # ==============================================================================
-# 8. TRÍCH XUẤT TỐI ĐA KHLCNT TRONG 14 TỈNH/TP VỚI PHÂN TRANG & LỌC THỜI GIAN
+# 8. TRÍCH XUẤT KHLCNT TRONG 14 TỈNH/TP VỚI PHÂN TẦNG GIỚI HẠN QUÉT
 # ==============================================================================
 def fetch_khlcnt_target_provinces(driver):
     print(f"-> Kết nối Session Mua Sắm Công KHLCNT - 14 Tỉnh/TP (Khung quét: {START_TIME.strftime('%H:%M %d/%m/%Y')} -> {TODAY_STR})...")
@@ -343,20 +344,23 @@ def fetch_khlcnt_target_provinces(driver):
     .catch(err => callback({ error: err.toString() }));
     """
 
-    all_queries = KEYWORDS + BROAD_MEDICAL_QUERIES
+    query_plan = [(kw, SPECIFIC_MAX_RECORDS) for kw in KEYWORDS] + [(kw, BROAD_MAX_RECORDS) for kw in BROAD_QUERIES]
 
-    for kw in all_queries:
-        print(f"-> Quét 14 tỉnh từ khóa: '{kw}'...")
+    for kw, max_records in query_plan:
+        print(f"-> Quét 14 tỉnh từ khóa: '{kw}' (Giới hạn tối đa {max_records} bản ghi/nhóm)...")
         matched_in_kw = 0
-        fetched_in_kw = 0
+        fetched_per_block = 0
+        total_fetched_in_kw = 0
+        page_num = 0
 
-        for page_num in range(MAX_PAGES_PER_QUERY):
+        while fetched_per_block < max_records:
+            current_page_size = min(100, max_records - fetched_per_block)
             try:
                 res = driver.execute_async_script(
                     js_fetch_search_khlcnt,
                     kw,
                     page_num,
-                    PAGE_SIZE,
+                    current_page_size,
                     from_date_iso,
                     to_date_iso,
                     token_val
@@ -380,7 +384,8 @@ def fetch_khlcnt_target_provinces(driver):
                 if not data_list:
                     break
 
-                fetched_in_kw += len(data_list)
+                fetched_per_block += current_page_size
+                total_fetched_in_kw += len(data_list)
                 older_records_count = 0
 
                 for item in data_list:
@@ -411,15 +416,12 @@ def fetch_khlcnt_target_provinces(driver):
                     if not matched_province:
                         continue
 
-                    # Kiểm tra nhanh vòng 1 xem có khớp 19 từ khóa y tế trên dữ liệu tìm kiếm không
-                    matched_kws = [k for k in KEYWORDS if k.lower() in raw_str]
-
                     # Deep-scan gói thầu con bên trong KHLCNT thuộc 14 tỉnh để tìm đủ 19 từ khóa y tế
                     decision_no = ""
                     bid_packages_summary = []
                     expected_times = set()
 
-                    if plan_id and (matched_kws or kw in BROAD_MEDICAL_QUERIES):
+                    if plan_id:
                         detail_json, detail_str = get_khlcnt_detail_values(driver, plan_id, token_val)
                         if detail_str:
                             raw_str += " " + detail_str
@@ -446,8 +448,7 @@ def fetch_khlcnt_target_provinces(driver):
                                             f"Gói: {b_name} | Giá: {b_price} | Hình thức: {b_form_text} | Dự kiến: {b_time_expected} | Nguồn vốn: {b_capital}"
                                         )
 
-                        matched_kws = [k for k in KEYWORDS if k.lower() in raw_str]
-
+                    matched_kws = [k for k in KEYWORDS if k.lower() in raw_str]
                     if matched_kws:
                         matched_in_kw += 1
                         header_text = f"{plan_no} {plan_name}".lower()
@@ -473,15 +474,16 @@ def fetch_khlcnt_target_provinces(driver):
                             "detail_url": detail_url
                         }
 
-                if max_block_len < PAGE_SIZE or older_records_count > len(data_list) * 0.7:
+                if max_block_len < current_page_size or older_records_count > len(data_list) * 0.7:
                     break
 
+                page_num += 1
                 time.sleep(0.4)
             except Exception as e:
                 print(f"[CẢNH BÁO FETCH KHLCNT] Từ khóa '{kw}' (Trang {page_num}): {e}")
                 break
 
-        print(f"    + Đã quét {fetched_in_kw} bản ghi -> Lọc được {matched_in_kw} KHLCNT y tế tại 14 tỉnh.")
+        print(f"    + Đã quét {total_fetched_in_kw} bản ghi -> Lọc được {matched_in_kw} KHLCNT y tế tại 14 tỉnh.")
         time.sleep(0.3)
 
     print(f"=== TỔNG KẾT QUÉT 14 TỈNH/TP: {len(unique_matches)} KHLCNT KHỚP 19 TỪ KHÓA Y TẾ ===")
