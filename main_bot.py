@@ -58,6 +58,17 @@ else:
 BASE_DOMAIN = "muasamcong.mof.gov.vn"
 PRIMARY_MODEL = "gemini-3.8-flash"
 
+BID_FORM_MAP = {
+    "DTRR": "Đấu thầu rộng rãi",
+    "DTHC": "Đấu thầu hạn chế",
+    "CDT": "Chỉ định thầu",
+    "CDTRG": "Chỉ định thầu rút gọn",
+    "CHCT": "Chào hàng cạnh tranh",
+    "CHCTRG": "Chào hàng cạnh tranh rút gọn",
+    "MSTT": "Mua sắm trực tiếp",
+    "TTH": "Tự thực hiện"
+}
+
 # ==============================================================================
 # 3. KHỞI TẠO CHROME HEADLESS
 # ==============================================================================
@@ -76,7 +87,7 @@ def init_driver():
     return driver
 
 # ==============================================================================
-# 4. LỌC THỜI GIAN ĐĂNG TRONG KHOẢNG [START_TIME -> NOW_VN] & ĐỊNH DẠNG TIỀN TỆ
+# 4. LỌC THỜI GIAN ĐĂNG (publicDate trên cổng đang là giờ VN UTC+7)
 # ==============================================================================
 def is_published_in_time_window(item):
     pub_date_str = item.get("publicDate") or item.get("originalPublicDate") or ""
@@ -84,7 +95,7 @@ def is_published_in_time_window(item):
         return True
     try:
         clean_date_str = pub_date_str.split(".")[0].replace("Z", "")
-        dt_obj = datetime.strptime(clean_date_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).astimezone(TZ_VN)
+        dt_obj = datetime.strptime(clean_date_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=TZ_VN)
         return START_TIME <= dt_obj <= NOW_VN
     except Exception:
         return True
@@ -95,7 +106,7 @@ def format_date_str(date_str):
         return "Chưa xác định"
     try:
         clean_str = date_str.split(".")[0].replace("Z", "")
-        dt_obj = datetime.strptime(clean_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).astimezone(TZ_VN)
+        dt_obj = datetime.strptime(clean_str, "%Y-%m-%dT%H:%M:%S")
         return dt_obj.strftime("%H:%M %d/%m/%Y")
     except Exception:
         return str(date_str)
@@ -110,15 +121,28 @@ def format_currency(amount):
     except Exception:
         return str(amount)
 
+
+def format_expected_bid_time(pkg):
+    unit = pkg.get("bidStartUnit", "")
+    year = pkg.get("bidStartYear", "")
+    quarter = pkg.get("bidStartQuarter", "")
+    month = pkg.get("bidStartMonth", "")
+    if unit == "Q" and quarter and year:
+        return f"Quý {quarter}/{year}"
+    if unit == "M" and month and year:
+        return f"Tháng {month}/{year}"
+    if year:
+        return f"Năm {year}"
+    return "Chưa rõ thời gian"
+
 # ==============================================================================
 # 5. KIỂM TRA & CHUẨN HÓA ĐỊA PHƯƠNG
 # ==============================================================================
 def check_location(item, raw_str):
     found_locs = []
     investor = str(item.get("investorName") or item.get("procuringEntityName") or "").lower()
-    plan_name = str(item.get("planName") or item.get("name") or "").lower()
-    project_name = str(item.get("projectName") or "").lower()
-    search_text = f"{investor} {plan_name} {project_name} {raw_str}"
+    plan_name = str(item.get("name") or item.get("pname") or "").lower()
+    search_text = f"{investor} {plan_name} {raw_str}"
 
     locations_arr = item.get("locations", [])
     if isinstance(locations_arr, list):
@@ -142,7 +166,7 @@ def check_location(item, raw_str):
     return list(set(found_locs))
 
 # ==============================================================================
-# 6. DEEP-SCAN LẤY CHI TIẾT DANH SÁCH GÓI THẦU BÊN TRONG KHLCNT
+# 6. DEEP-SCAN CHI TIẾT KHLCNT (bid-po-bidp-plan-project-view/get-by-id)
 # ==============================================================================
 def get_khlcnt_detail_values(driver, plan_id, token_val):
     js_get_khlcnt = """
@@ -150,7 +174,7 @@ def get_khlcnt_detail_values(driver, plan_id, token_val):
     var planId = arguments[0];
     var token = arguments[1];
 
-    let url = '/o/egp-portal-contractor-selection-v2/services/plan/get-by-id';
+    let url = '/o/egp-portal-contractor-selection-v2/services/expose/lcnt/bid-po-bidp-plan-project-view/get-by-id';
     if (token) {
         url += '?token=' + token;
     }
@@ -194,7 +218,7 @@ def build_khlcnt_detail_url(plan_id):
     )
 
 # ==============================================================================
-# 8. TRÍCH XUẤT DỮ LIỆU KHLCNT THEO KHUNG THỜI GIAN
+# 8. TRÍCH XUẤT DỮ LIỆU KHLCNT THEO KHUNG THỜI GIAN & DEEP-SCAN GÓI THẦU CON
 # ==============================================================================
 def fetch_khlcnt_today(driver):
     print(f"-> Kết nối Session Mua Sắm Công KHLCNT (Khung quét: {START_TIME.strftime('%H:%M %d/%m/%Y')} -> {TODAY_STR})...")
@@ -231,33 +255,58 @@ def fetch_khlcnt_today(driver):
         url += '?token=' + token;
     }
 
-    fetch(url, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json, text/plain, */*'
-        },
-        body: JSON.stringify([{
+    const baseFilter = [{ fieldName: "type", searchType: "in", fieldValues: ["es-plan-project-p"] }];
+
+    const payload = [
+        {
             pageSize: 50,
             pageNumber: "0",
             query: [{
                 index: "es-contractor-selection",
                 keyWord: kw,
                 matchType: "all-1",
-                matchFields: ["planNo", "planName", "projectName", "investorName"],
-                filters: [
-                    { fieldName: "type", searchType: "in", fieldValues: ["KHLCNT"] }
-                ]
+                matchFields: ["planNo", "name"],
+                filters: baseFilter
             }]
-        }])
+        },
+        {
+            pageSize: 50,
+            pageNumber: "0",
+            query: [{
+                index: "es-contractor-selection",
+                keyWord: kw,
+                matchType: "all-1",
+                matchFields: ["generalTasks"],
+                filters: baseFilter
+            }]
+        },
+        {
+            pageSize: 50,
+            pageNumber: "0",
+            query: [{
+                index: "es-contractor-selection",
+                keyWord: kw,
+                matchType: "all-1",
+                matchFields: ["bidName"],
+                filters: baseFilter
+            }]
+        }
+    ];
+
+    fetch(url, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json, text/plain, */*'
+        },
+        body: JSON.stringify(payload)
     })
     .then(response => response.json())
     .then(data => callback(data))
     .catch(err => callback({ error: err.toString() }));
     """
 
-    # Kết hợp 19 từ khóa chuyên sâu + các từ khóa bao quát để quét cả những KHLCNT đặt tên chung
-    search_queries = KEYWORDS + ["thiết bị y tế", "y tế", "bệnh viện", "vật tư y tế", "trang thiết bị"]
+    search_queries = KEYWORDS + ["thiết bị y tế", "y tế", "bệnh viện", "vật tư y tế"]
 
     for kw in search_queries:
         print(f"-> Truy vấn KHLCNT cho từ khóa: '{kw}'...")
@@ -265,15 +314,14 @@ def fetch_khlcnt_today(driver):
             res = driver.execute_async_script(js_fetch_search_khlcnt, kw, token_val)
             data_list = []
 
-            if isinstance(res, list) and len(res) > 0:
-                first_item = res[0]
-                if isinstance(first_item, dict):
-                    data_list = first_item.get("page", {}).get("content", [])
+            if isinstance(res, list):
+                for block in res:
+                    if isinstance(block, dict):
+                        content = block.get("page", {}).get("content", [])
+                        if isinstance(content, list):
+                            data_list.extend(content)
             elif isinstance(res, dict):
                 data_list = res.get("page", {}).get("content", [])
-
-            if not isinstance(data_list, list):
-                data_list = []
 
             matched_in_kw = 0
             for item in data_list:
@@ -283,71 +331,83 @@ def fetch_khlcnt_today(driver):
                 if not is_published_in_time_window(item):
                     continue
 
-                plan_no = str(item.get("planNo") or item.get("notifyNo") or "")
+                plan_no = str(item.get("planNo") or item.get("planNoStand") or "")
                 plan_id = str(item.get("id") or "")
                 if not plan_no or plan_no in unique_matches:
                     continue
 
-                plan_name = str(item.get("planName") or item.get("name") or "Chưa cập nhật tên KHLCNT")
-                project_name = str(item.get("projectName") or "")
-                investor = str(item.get("investorName") or item.get("procuringEntityName") or "")
+                plan_name = str(item.get("name") or item.get("pname") or "Chưa cập nhật tên KHLCNT").replace("\n", " ").strip()
+                investor = str(item.get("investorName") or item.get("procuringEntityName") or "").strip()
                 public_date = format_date_str(item.get("publicDate") or item.get("originalPublicDate"))
-                invest_total = format_currency(item.get("investTotal") or item.get("totalInvest"))
-
+                invest_total = format_currency(item.get("investTotal"))
                 detail_url = build_khlcnt_detail_url(plan_id)
+
                 raw_str = json.dumps(item, ensure_ascii=False).lower()
 
-                # Deep-scan danh sách gói thầu con bên trong KHLCNT
+                # Kiểm tra địa phương trước để tối ưu tốc độ Deep-Scan
+                matched_province = check_location(item, raw_str)
+                if not matched_province:
+                    continue
+
+                # Deep-scan API chi tiết KHLCNT để lấy đầy đủ gói thầu con, hình thức LCNT, quý tổ chức
+                decision_no = ""
                 bid_packages_summary = []
+                expected_times = set()
+
                 if plan_id:
                     detail_json, detail_str = get_khlcnt_detail_values(driver, plan_id, token_val)
                     if detail_str:
                         raw_str += " " + detail_str
-                        # Trích xuất tên các gói thầu con để gửi cho AI phân tích chính xác
-                        bid_list = (
-                            detail_json.get("bidList")
-                            or detail_json.get("data", {}).get("bidList")
-                            or detail_json.get("packages")
-                            or []
-                        )
-                        if isinstance(bid_list, list):
-                            for b in bid_list[:20]:
-                                if isinstance(b, dict):
-                                    b_name = b.get("bidName") or b.get("name") or ""
-                                    b_price = format_currency(b.get("bidPrice") or b.get("price"))
-                                    b_time = b.get("bidStartTime") or b.get("selectStartTime") or ""
-                                    if b_name:
-                                        bid_packages_summary.append(f"{b_name} ({b_price} - Dự kiến: {b_time})")
+                        plan_view = detail_json.get("bidPoBidpPlanProjectDetailView") or {}
+                        decision_no = plan_view.get("decisionNo") or ""
+
+                        pkg_list = detail_json.get("bidpPlanDetailToProjectList") or []
+                        if isinstance(pkg_list, list):
+                            for pkg in pkg_list:
+                                if not isinstance(pkg, dict):
+                                    continue
+                                b_name = str(pkg.get("bidName") or "").replace("\n", " ").strip()
+                                b_price = format_currency(pkg.get("bidPrice"))
+                                b_form_code = pkg.get("bidForm") or ""
+                                b_form_text = BID_FORM_MAP.get(b_form_code, b_form_code)
+                                b_time_expected = format_expected_bid_time(pkg)
+                                b_capital = pkg.get("capitalDetail") or ""
+
+                                if b_time_expected != "Chưa rõ thời gian":
+                                    expected_times.add(b_time_expected)
+
+                                if b_name:
+                                    bid_packages_summary.append(
+                                        f"Gói: {b_name} | Giá: {b_price} | Hình thức: {b_form_text} | Dự kiến: {b_time_expected} | Nguồn vốn: {b_capital}"
+                                    )
 
                 matched_kws = [k for k in KEYWORDS if k.lower() in raw_str]
                 if matched_kws:
-                    matched_province = check_location(item, raw_str)
-                    if matched_province:
-                        matched_in_kw += 1
-                        header_text = f"{plan_no} {plan_name} {project_name}".lower()
-                        location_detail = (
-                            "Tên KHLCNT / Dự án"
-                            if any(k.lower() in header_text for k in matched_kws)
-                            else "Danh mục Gói thầu chi tiết"
-                        )
+                    matched_in_kw += 1
+                    header_text = f"{plan_no} {plan_name}".lower()
+                    location_detail = (
+                        "Tên KHLCNT"
+                        if any(k.lower() in header_text for k in matched_kws)
+                        else "Danh mục Gói thầu chi tiết"
+                    )
 
-                        unique_matches[plan_no] = {
-                            "code": plan_no,
-                            "plan_id": plan_id,
-                            "title": plan_name,
-                            "project_name": project_name,
-                            "investor": investor,
-                            "invest_total": invest_total,
-                            "public_date": public_date,
-                            "province": ", ".join(matched_province),
-                            "matched_kw": ", ".join(matched_kws),
-                            "location": location_detail,
-                            "bid_packages": bid_packages_summary,
-                            "detail_url": detail_url,
-                            "snippet": raw_str[:1500]
-                        }
+                    unique_matches[plan_no] = {
+                        "code": plan_no,
+                        "decision_no": decision_no,
+                        "plan_id": plan_id,
+                        "title": plan_name,
+                        "investor": investor,
+                        "invest_total": invest_total,
+                        "public_date": public_date,
+                        "expected_time": ", ".join(sorted(expected_times)) if expected_times else "Xem chi tiết",
+                        "province": ", ".join(matched_province),
+                        "matched_kw": ", ".join(matched_kws),
+                        "location": location_detail,
+                        "bid_packages": bid_packages_summary[:25],
+                        "detail_url": detail_url
+                    }
 
-            print(f"    + Server trả về {len(data_list)} KHLCNT -> Khớp khung thời gian, địa phương & từ khóa: {matched_in_kw} kế hoạch.")
+            print(f"    + Server trả về {len(data_list)} bản ghi -> Khớp khung thời gian, địa phương & từ khóa: {matched_in_kw} KHLCNT.")
             time.sleep(0.5)
         except Exception as e:
             print(f"[CẢNH BÁO FETCH KHLCNT] Từ khóa '{kw}': {e}")
@@ -377,7 +437,7 @@ Dưới đây là danh sách các KHLCNT phát hành từ {START_TIME.strftime('
 
 Yêu cầu:
 1. Giữ nguyên toàn bộ danh sách đầu vào.
-2. Dựa vào tên KHLCNT, tên dự án và danh sách gói thầu con (bid_packages), viết 1-2 câu tóm tắt ngắn gọn: gói thầu liên quan thiết bị y tế gì, giá gói thầu và thời gian dự kiến tổ chức lựa chọn nhà thầu.
+2. Dựa vào danh sách gói thầu con (bid_packages), viết 1-2 câu tóm tắt ngắn gọn: gói thầu liên quan thiết bị y tế gì, giá trị gói thầu, hình thức lựa chọn nhà thầu và thời gian dự kiến tổ chức.
 3. Trả về đúng mảng JSON chứa các object đầy đủ thuộc tính và thêm trường "reason".
 
 Danh sách:
@@ -432,27 +492,29 @@ def send_email_report(matched_list):
         rows = ""
         for idx, item in enumerate(matched_list, 1):
             code = item.get("code", "")
+            decision_no = item.get("decision_no", "")
             title = item.get("title", "")
-            project_name = item.get("project_name", "")
             investor = item.get("investor", "")
             invest_total = item.get("invest_total", "Chưa cập nhật")
             public_date = item.get("public_date", "")
+            expected_time = item.get("expected_time", "Xem chi tiết")
             province = item.get("province", "Theo dõi")
             location = item.get("location", "Danh mục Gói thầu chi tiết")
             reason = item.get("reason") or "Khớp từ khóa theo dõi y tế trong KHLCNT"
             matched_kw = item.get("matched_kw", "")
             detail_url = item.get("detail_url") or f"https://{BASE_DOMAIN}/web/guest/contractor-selection?render=index"
 
-            title_block = f"<b>{title}</b>"
-            if project_name and project_name.lower() != title.lower():
-                title_block += f"<br><small style='color: #555;'><i>Dự án: {project_name}</i></small>"
+            code_block = f"<b>{code}</b><br><small style='color: #666;'>Đăng: {public_date}</small>"
+            if decision_no:
+                code_block += f"<br><small style='color: #0275d8;'>QĐ: {decision_no}</small>"
 
             rows += f"""
             <tr>
                 <td align="center">{idx}</td>
-                <td><b>{code}</b><br><small style="color: #666;">{public_date}</small></td>
-                <td>{title_block}</td>
+                <td>{code_block}</td>
+                <td><b>{title}</b></td>
                 <td align="right"><span style="color: #d9534f; font-weight: bold;">{invest_total}</span></td>
+                <td align="center"><span style="color: #2e7d32; font-weight: bold;">{expected_time}</span></td>
                 <td>{investor}</td>
                 <td align="center"><b><span style="color: #0275d8;">{province}</span></b></td>
                 <td align="center"><span style="background-color: #ffffcc; padding: 3px 6px; border-radius: 3px;">{matched_kw}</span></td>
@@ -470,9 +532,10 @@ def send_email_report(matched_list):
             <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width: 100%; border-color: #ddd;">
                 <tr style="background-color: #e6f2ff;">
                     <th align="center">STT</th>
-                    <th>Mã KHLCNT / Ngày đăng</th>
-                    <th>Tên KHLCNT & Dự án</th>
+                    <th>Mã KHLCNT / Số QĐ</th>
+                    <th>Tên KHLCNT</th>
                     <th align="center">Tổng Mức Đầu Tư</th>
+                    <th align="center">Dự Kiến LCNT</th>
                     <th>Chủ Đầu Tư</th>
                     <th align="center">Tỉnh / TP</th>
                     <th align="center">Từ Khóa Khớp</th>
