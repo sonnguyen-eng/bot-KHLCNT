@@ -14,7 +14,7 @@ from selenium.webdriver.common.keys import Keys
 from webdriver_manager.chrome import ChromeDriverManager
 
 # ==============================================================================
-# 1. CẤU HÌNH BIẾN MÔI TRƯỜNG & DANH SÁCH 19 TỪ KHÓA Y TẾ
+# 1. CẤU HÌNH BIẾN MÔI TRƯỜNG & DANH SÁCH TỪ KHÓA Y TẾ
 # ==============================================================================
 RAW_GEMINI_KEYS = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_API_KEYS = [k.strip() for k in RAW_GEMINI_KEYS.split(",") if k.strip()]
@@ -32,6 +32,7 @@ KEYWORDS = [
     "ERCP", "Monitor theo dõi bệnh nhân", "Máy hấp tiệt trùng", "Nhiệt độ thấp", 
     "máy gây mê", "Bơm tiêm điện", "máy truyền dịch", "bàn khám sản", 
     "Monitor sản khoa", "máy hấp ướt", "giường ICU", "giường cấp cứu", 
+    "giường đa năng", "giường bệnh", "thẩm định giá",
     "Bồn oxy lỏng", "Oxy trung tâm"
 ]
 
@@ -87,8 +88,8 @@ PRIMARY_MODEL = "gemini-3.8-flash"
 FALLBACK_MODEL = "gemini-3.8-flash-lite"
 
 # Phân tầng giới hạn bản ghi quét (Server trả về tối đa 50 bản ghi/trang/nhóm trường):
-# - 19 từ khóa sản phẩm cụ thể: tối đa 150 bản ghi / nhóm trường (3 trang x 50)
-# - 9 từ khóa chung mở rộng: tối đa 500 bản ghi / nhóm trường (10 trang x 50)
+# - Từ khóa sản phẩm cụ thể: tối đa 150 bản ghi / nhóm trường (3 trang x 50)
+# - Từ khóa chung mở rộng: tối đa 500 bản ghi / nhóm trường (10 trang x 50)
 SERVER_MAX_PAGE_SIZE = 50
 SPECIFIC_MAX_RECORDS = 150
 BROAD_MAX_RECORDS = 500
@@ -470,7 +471,6 @@ def fetch_khlcnt_target_provinces(driver):
                 if max_total_elements is None and block_totals:
                     max_total_elements = max(block_totals)
 
-                # Nếu trang 0 rỗng bất thường do token hết hạn, làm mới token và thử lại 1 lần
                 if not data_list and page_num == 0 and max_total_elements is None and not retried_token_for_kw:
                     retried_token_for_kw = True
                     new_tok = refresh_session_token(driver, kw)
@@ -585,7 +585,7 @@ def fetch_khlcnt_target_provinces(driver):
         print(f"    + Đã tải {total_fetched_in_kw} bản ghi{total_label} (thuộc 14 tỉnh: {province_in_kw}) -> Khớp từ khóa y tế: {matched_in_kw} KHLCNT.")
         time.sleep(0.35)
 
-    print(f"=== TỔNG KẾT QUÉT 14 TỈNH/TP: {len(unique_matches)} KHLCNT KHỚP 19 TỪ KHÓA Y TẾ ===")
+    print(f"=== TỔNG KẾT QUÉT 14 TỈNH/TP: {len(unique_matches)} KHLCNT KHỚP TỪ KHÓA Y TẾ ===")
     return list(unique_matches.values())
 
 # ==============================================================================
@@ -600,16 +600,17 @@ def analyze_batch_with_gemini(batch_items):
 
     prompt = f"""
 Bạn là chuyên gia phân tích dữ liệu Kế hoạch lựa chọn nhà thầu (KHLCNT) Trang thiết bị Y tế.
-Dưới đây là danh sách các KHLCNT phát hành từ {START_TIME.strftime('%H:%M %d/%m/%Y')} đến {TODAY_STR} đã lọc theo 14 địa phương phụ trách và 19 từ khóa y tế.
+Dưới đây là danh sách các KHLCNT phát hành từ {START_TIME.strftime('%H:%M %d/%m/%Y')} đến {TODAY_STR} đã lọc theo 14 địa phương phụ trách và từ khóa y tế.
 
 Yêu cầu:
-1. Giữ nguyên toàn bộ danh sách đầu vào.
-2. Dựa vào danh sách gói thầu con (bid_packages), viết 1-2 câu tóm tắt ngắn gọn: gói thầu liên quan thiết bị y tế gì, giá trị gói thầu, hình thức lựa chọn nhà thầu và thời gian dự kiến tổ chức.
-3. Trả về đúng mảng JSON chứa các object đầy đủ thuộc tính và thêm trường "reason".
+1. Giữ nguyên toàn bộ danh sách đầu vào và mọi thuộc tính gốc.
+2. Dựa vào danh sách gói thầu con (bid_packages), viết 1-2 câu tóm tắt ngắn gọn vào trường "reason": gói thầu liên quan thiết bị y tế gì, giá trị gói thầu, hình thức lựa chọn nhà thầu và thời gian dự kiến tổ chức.
+3. Thêm trường "stage": ghi "KHLCNT (Kế hoạch được duyệt)".
+4. Thêm trường "bu_group": phân loại vào 1 trong các nhóm [Nội soi - Tiêu hóa, Phòng mổ - Gây mê, Hồi sức - Giường bệnh, Tiệt trùng, Khí y tế, Vật tư & Khác].
+5. Trả về đúng mảng JSON thuần túy (không kèm markdown).
 
 Danh sách:
 {json.dumps(batch_items, ensure_ascii=False, indent=2)}
-Chỉ trả về chuỗi JSON thuần túy (không kèm markdown).
 """
 
     for model_name in models_to_try:
@@ -692,7 +693,7 @@ def send_email_report(matched_list):
         html_body = f"""
         <div style="font-family: Arial, sans-serif; padding: 20px;">
             <h3 style="color: #d9534f;">BÁO CÁO KẾ HOẠCH LỰA CHỌN NHÀ THẦU (KHLCNT)</h3>
-            <p>Hệ thống đã quét dữ liệu từ <b>{START_TIME.strftime('%H:%M %d/%m/%Y')}</b> đến <b>{TODAY_STR}</b> nhưng chưa phát hiện KHLCNT mới khớp 19 từ khóa y tế tại 14 địa phương theo dõi.</p>
+            <p>Hệ thống đã quét dữ liệu từ <b>{START_TIME.strftime('%H:%M %d/%m/%Y')}</b> đến <b>{TODAY_STR}</b> nhưng chưa phát hiện KHLCNT mới khớp từ khóa y tế tại 14 địa phương theo dõi.</p>
         </div>
         """
     else:
@@ -775,6 +776,8 @@ def main():
     try:
         matched_list = fetch_khlcnt_target_provinces(driver)
         final_matches = analyze_with_gemini(matched_list)
+        with open("latest_results.json", "w", encoding="utf-8") as f:
+            json.dump(final_matches, f, ensure_ascii=False, indent=2)
         send_email_report(final_matches)
     finally:
         driver.quit()
