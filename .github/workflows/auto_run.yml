@@ -7,9 +7,14 @@ on:
     - cron: '30 9 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   crawl-khlcnt:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -22,11 +27,25 @@ jobs:
 
       - name: Install Google Chrome
         uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Lấy mốc thời gian lần chạy tự động (schedule) thành công gần nhất
+        id: get_last_run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LAST_RUN=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${{ github.repository }}/actions/workflows/auto_run.yml/runs?event=schedule&status=success&per_page=1" \
+            --jq '.workflow_runs[0].created_at // empty')
+          echo "last_run=$LAST_RUN" >> $GITHUB_OUTPUT
+          echo "Mốc lịch chạy tự động KHLCNT thành công gần nhất: $LAST_RUN"
 
       - name: Run Bot KHLCNT
         env:
@@ -34,5 +53,6 @@ jobs:
           SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
           SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
           RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
-        run: |
-          python main_bot.py
+          LAST_RUN_TIMESTAMP: ${{ steps.get_last_run.outputs.last_run }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: python main_bot.py
