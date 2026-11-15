@@ -47,7 +47,7 @@ jobs:
           echo "last_run=$LAST_RUN" >> $GITHUB_OUTPUT
           echo "Mốc lịch chạy tự động KHLCNT thành công gần nhất: $LAST_RUN"
 
-      - name: Run Bot KHLCNT
+      - name: Run Bot KHLCNT (Bước 1 - Quét & Phân tích AI)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
@@ -56,3 +56,9 @@ jobs:
           LAST_RUN_TIMESTAMP: ${{ steps.get_last_run.outputs.last_run }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: python main_bot.py
+
+      - name: Sync to Google Sheets (Bước 2 - Ghi dữ liệu mới không trùng)
+        env:
+          GSHEET_ID: ${{ secrets.GSHEET_ID }}
+          GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
+        run: python sync_to_gsheet.py KHLCNT
