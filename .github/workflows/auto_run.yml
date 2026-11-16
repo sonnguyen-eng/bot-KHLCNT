@@ -2,9 +2,9 @@ name: Auto Crawl KHLCNT
 
 on:
   schedule:
-    # Chạy tự động lúc 08:00 sáng và 16:30 chiều giờ Việt Nam (01:00 và 09:30 UTC)
-    - cron: '0 1 * * *'
-    - cron: '30 9 * * *'
+    # Chạy tự động lúc 06:15 sáng và 20:45 tối giờ Việt Nam (23:15 và 13:45 UTC)
+    - cron: '15 23 * * *'
+    - cron: '45 13 * * *'
   workflow_dispatch:
 
 permissions:
