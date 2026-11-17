@@ -133,8 +133,8 @@ else:
     START_TIME = NOW_VN - timedelta(hours=24)
 
 BASE_DOMAIN = "muasamcong.mof.gov.vn"
-PRIMARY_MODEL = "gemini-3.8-flash"
-FALLBACK_MODEL = "gemini-3.8-flash-lite"
+PRIMARY_MODEL = "gemini-2.5-flash"
+FALLBACK_MODEL = "gemini-2.5-flash-lite"
 
 SERVER_MAX_PAGE_SIZE = 50
 SPECIFIC_MAX_RECORDS = 150
@@ -755,7 +755,12 @@ def analyze_batch_with_gemini(batch_items):
     from google import genai
     from google.genai import types
 
-    models_to_try = [PRIMARY_MODEL, FALLBACK_MODEL, "gemini-3.8-pro"]
+    models_to_try = [
+        PRIMARY_MODEL,
+        FALLBACK_MODEL,
+        "gemini-2.5-pro",
+        "gemini-2.0-flash"
+    ]
 
     prompt = f"""
 Bạn là chuyên gia thẩm định dữ liệu Kế hoạch lựa chọn nhà thầu (KHLCNT) Trang thiết bị Y tế, Hệ thống PACS và Dự án đầu tư xây dựng Bệnh viện.
@@ -777,13 +782,15 @@ Danh sách:
 {json.dumps(batch_items, ensure_ascii=False, indent=2)}
 """
 
+    retry_delays = [8, 15, 25]
+
     for model_name in models_to_try:
         key_idx = current_key_index
         while key_idx < len(GEMINI_API_KEYS):
             key = GEMINI_API_KEYS[key_idx]
             client = genai.Client(api_key=key)
 
-            for attempt in range(2):
+            for attempt in range(len(retry_delays)):
                 try:
                     response = client.models.generate_content(
                         model=model_name,
@@ -810,9 +817,10 @@ Danh sách:
                         break
 
                     if "503" in error_msg or "unavailable" in error_msg.lower():
-                        if attempt == 0:
-                            print(f"⏳ Model {model_name} đang quá tải, thử lại sau 10s...")
-                            time.sleep(10)
+                        if attempt < len(retry_delays) - 1:
+                            wait_sec = retry_delays[attempt]
+                            print(f"⏳ Model {model_name} đang quá tải (503), thử lại lần {attempt + 2} sau {wait_sec}s...")
+                            time.sleep(wait_sec)
                             continue
                         key_idx = len(GEMINI_API_KEYS)
                         break
