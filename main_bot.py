@@ -82,10 +82,13 @@ EXCLUDE_NON_MEDICAL_PATTERNS = [
     "kiểm xạ an toàn", "liều kế cá nhân", "khám sức khỏe định kỳ"
 ]
 
-# Cụm từ nhận diện gói thuần THUÊ dịch vụ phần mềm (không phải mua đứt/đầu tư PACS)
-RENTAL_SOFTWARE_TERMS = [
+# Cụm từ nhận diện gói THUÊ PACS / thuê dịch vụ phần mềm (loại trừ tuyệt đối)
+RENTAL_PACS_OR_SOFTWARE_TERMS = [
     "thuê dịch vụ sử dụng phần mềm", "thuê dịch vụ phần mềm",
-    "thuê hệ thống phần mềm", "thuê phần mềm", "cung cấp dịch vụ phần mềm"
+    "thuê dịch vụ hệ thống", "thuê hệ thống ris", "thuê hệ thống pacs",
+    "thuê hệ thống phần mềm", "thuê phần mềm", "thuê pacs", "thuê ris/pacs",
+    "dịch vụ hệ thống thông tin", "ca chụp/tháng",
+    "sl: 12 tháng", "sl: 24 tháng", "sl: 36 tháng", "sl: 6 tháng"
 ]
 
 BROAD_QUERIES = [
@@ -133,8 +136,8 @@ else:
     START_TIME = NOW_VN - timedelta(hours=24)
 
 BASE_DOMAIN = "muasamcong.mof.gov.vn"
-PRIMARY_MODEL = "gemini-2.5-flash"
-FALLBACK_MODEL = "gemini-2.5-flash-lite"
+PRIMARY_MODEL = "gemini-3.8-flash"
+FALLBACK_MODEL = "gemini-3.5-flash-lite"
 
 SERVER_MAX_PAGE_SIZE = 50
 SPECIFIC_MAX_RECORDS = 150
@@ -352,19 +355,14 @@ def refresh_session_token(driver, kw_hint="y tế"):
     return get_latest_token_from_perf(driver)
 
 # ==============================================================================
-# 9. BỘ LỌC 2 LỚP: LOẠI BỎ DỰ ÁN NGOÀI Y TẾ & NHẬN DIỆN TBYT / PACS / CÔNG TRÌNH BV
+# 9. BỘ LỌC 2 LỚP: LOẠI BỎ DỰ ÁN NGOÀI Y TẾ & THUÊ PACS; BẮT MUA PACS & DỰ ÁN BV
 # ==============================================================================
 def evaluate_medical_relevance(plan_name, investor, pkg_names_list, raw_str):
-    """
-    Đánh giá độ liên quan thực sự đến TBYT, mua sắm/đầu tư PACS hoặc Dự án xây mới/nâng cấp Bệnh viện:
-    - Loại bỏ tuyệt đối các gói hạ tầng giao thông, trường học, công viên, trụ sở xã,
-      hoặc gói thuần THUÊ dịch vụ phần mềm (HIS/EMR/PACS cho thuê định kỳ).
-    - Giữ lại các gói MUA SẮM / ĐẦU TƯ / CUNG CẤP LẮP ĐẶT hệ thống PACS, RIS/PACS.
-    """
     plan_lower = plan_name.lower()
     investor_lower = investor.lower()
     pkgs_lower = " ".join(pkg_names_list).lower()
     core_text = f"{plan_lower} {investor_lower} {pkgs_lower}"
+    content_text = f"{plan_lower} {pkgs_lower}"
 
     # 1. Chốt chặn loại trừ các dự án ngoài ngành y tế hoặc kiểm xạ/khám sức khỏe định kỳ
     if any(excl in core_text for excl in EXCLUDE_NON_MEDICAL_PATTERNS):
@@ -373,23 +371,21 @@ def evaluate_medical_relevance(plan_name, investor, pkg_names_list, raw_str):
     if any(infra in plan_lower for infra in ["cầu đi bộ", "tuyến đường", "khu tái định cư", "hệ thống chiếu sáng", "trụ sở", "nhà văn hóa", "công viên"]):
         return False, False, []
 
-    # 2. Loại bỏ gói thuần THUÊ dịch vụ phần mềm (không phải mua đứt/đầu tư PACS)
-    is_software_rental = any(r in core_text for r in RENTAL_SOFTWARE_TERMS)
-    is_purchase_action = any(p in core_text for p in ["mua sắm", "mua ", "đầu tư", "cung cấp", "lắp đặt", "trang bị"])
-    if is_software_rental and not is_purchase_action:
+    # 2. Loại trừ TUYỆT ĐỐI các gói THUÊ dịch vụ phần mềm / THUÊ PACS
+    if any(r in content_text for r in RENTAL_PACS_OR_SOFTWARE_TERMS):
         return False, False, []
 
-    # Nếu chỉ là mua phần mềm bệnh án điện tử / HIS đơn thuần mà không có PACS hoặc TBYT thì bỏ qua
-    if ("bệnh án điện tử" in core_text or "phần mềm quản lý bệnh viện" in core_text) and not any(
-        p in core_text for p in ["pacs", "ris/pacs", "ris - pacs", "lưu trữ và truyền tải hình ảnh", "thiết bị y tế"]
+    # Nếu chỉ là phần mềm bệnh án điện tử / HIS đơn thuần mà không có mua PACS hoặc TBYT thì bỏ qua
+    if ("bệnh án điện tử" in content_text or "phần mềm quản lý bệnh viện" in content_text) and not any(
+        p in content_text for p in ["pacs", "ris/pacs", "ris - pacs", "lưu trữ và truyền tải hình ảnh", "thiết bị y tế"]
     ):
         return False, False, []
 
     # 3. Kiểm tra có thuộc thực thể / công trình y tế hay không
     has_medical_entity = any(ent in f"{plan_lower} {investor_lower}" for ent in MEDICAL_ENTITY_TERMS)
 
-    # 4. Kiểm tra từ khóa thiết bị y tế & PACS đặc thù
-    search_scope = f"{plan_lower} {pkgs_lower}" if pkgs_lower.strip() else raw_str
+    # 4. Kiểm tra từ khóa thiết bị y tế & mua đứt PACS đặc thù
+    search_scope = content_text if pkgs_lower.strip() else raw_str
     matched_specific = [k for k in SPECIFIC_DEVICE_KEYWORDS if k in search_scope]
 
     # 5. Kiểm tra từ khóa có điều kiện (CHỈ tính khi thuộc thực thể y tế và xuất hiện trong gói thầu/tên KH)
@@ -665,7 +661,9 @@ def fetch_khlcnt_target_provinces(driver):
                                         f"{prefix_code}{b_name} ({b_price} | {b_form_text} | Dự kiến: {b_time_expected})"
                                     )
                                     b_lower = b_name.lower()
-                                    if any(med_w in b_lower for med_w in ["thiết bị y tế", "y tế", "nội soi", "bàn mổ", "đèn mổ", "gây mê", "hồi sức", "giường", "x-quang", "siêu âm", "máy thở", "tán sỏi", "khí y tế", "tiệt trùng", "monitor", "sơ sinh", "thận nhân tạo", "robot", "pacs", "lưu trữ và truyền tải hình ảnh"]):
+                                    if not any(r in b_lower for r in RENTAL_PACS_OR_SOFTWARE_TERMS) and any(
+                                        med_w in b_lower for med_w in ["thiết bị y tế", "y tế", "nội soi", "bàn mổ", "đèn mổ", "gây mê", "hồi sức", "giường", "x-quang", "siêu âm", "máy thở", "tán sỏi", "khí y tế", "tiệt trùng", "monitor", "sơ sinh", "thận nhân tạo", "robot", "pacs", "lưu trữ và truyền tải hình ảnh"]
+                                    ):
                                         medical_pkg_names.append(f"{prefix_code}{b_name}")
                                         medical_pkg_total += b_num_price
 
@@ -741,14 +739,14 @@ def fetch_khlcnt_target_provinces(driver):
                 break
 
         total_label = f" (tổng max/nhóm: {max_total_elements})" if isinstance(max_total_elements, int) else ""
-        print(f"    + Đã tải {total_fetched_in_kw} bản ghi{total_label} (thuộc 14 tỉnh: {province_in_kw}) -> Khớp TBYT / PACS / Công trình BV: {matched_in_kw} KHLCNT.")
+        print(f"    + Đã tải {total_fetched_in_kw} bản ghi{total_label} (thuộc 14 tỉnh: {province_in_kw}) -> Khớp TBYT / Mua PACS / Công trình BV: {matched_in_kw} KHLCNT.")
         time.sleep(0.35)
 
     print(f"=== TỔNG KẾT QUÉT 14 TỈNH/TP: {len(unique_matches)} KẾ HOẠCH SẠCH KHỚP TIÊU CHÍ ===")
     return list(unique_matches.values())
 
 # ==============================================================================
-# 11. PHÂN TÍCH KHLCNT VỚI GEMINI AI & HẬU KIỂM LOẠI BỎ GÓI NGOÀI NGÀNH Y TẾ
+# 11. PHÂN TÍCH KHLCNT VỚI GEMINI AI & HẬU KIỂM LOẠI BỎ GÓI NGOÀI NGÀNH Y TẾ / THUÊ PACS
 # ==============================================================================
 def analyze_batch_with_gemini(batch_items):
     global current_key_index, GEMINI_API_KEYS
@@ -758,19 +756,18 @@ def analyze_batch_with_gemini(batch_items):
     models_to_try = [
         PRIMARY_MODEL,
         FALLBACK_MODEL,
-        "gemini-2.5-pro",
-        "gemini-2.0-flash"
+        "gemini-3.1-pro-preview"
     ]
 
     prompt = f"""
-Bạn là chuyên gia thẩm định dữ liệu Kế hoạch lựa chọn nhà thầu (KHLCNT) Trang thiết bị Y tế, Hệ thống PACS và Dự án đầu tư xây dựng Bệnh viện.
+Bạn là chuyên gia thẩm định dữ liệu Kế hoạch lựa chọn nhà thầu (KHLCNT) Trang thiết bị Y tế, Hệ thống PACS (chỉ mua đứt/đầu tư, KHÔNG lấy gói thuê) và Dự án đầu tư xây dựng Bệnh viện.
 Dưới đây là danh sách các KHLCNT phát hành từ {START_TIME.strftime('%H:%M %d/%m/%Y')} đến {TODAY_STR} tại 14 tỉnh/thành phố phụ trách.
 
 Yêu cầu BẮT BUỘC:
 1. Giữ nguyên toàn bộ thuộc tính gốc của từng phần tử trong danh sách đầu vào.
 2. Thêm trường boolean "is_medical_relevant":
    - Đặt true NẾU kế hoạch này liên quan đến mua sắm/sửa chữa Trang thiết bị y tế, vật tư y tế, MUA SẮM/ĐẦU TƯ hệ thống PACS (RIS/PACS), hoặc đầu tư xây mới/cải tạo nâng cấp Bệnh viện / Trung tâm y tế / Cơ sở khám chữa bệnh.
-   - Đặt false nếu đây là dự án ngoài ngành y tế (trường học, giao thông, công viên, UBND xã, công an, điện lực, di tích) hoặc chỉ là thuê dịch vụ phần mềm hành chính/EMR không có mua sắm PACS/TBYT.
+   - Đặt false nếu đây là dự án ngoài ngành y tế (trường học, giao thông, công viên, UBND xã, công an, điện lực, di tích) HOẶC là gói THUÊ dịch vụ phần mềm / THUÊ hệ thống RIS/PACS (ví dụ thuê 12 tháng, tính phí theo ca chụp/tháng).
 3. Trong trường "reason", trình bày ngắn gọn, rõ ràng:
    - Nếu là dự án xây mới / cải tạo / giai đoạn chuẩn bị đầu tư bệnh viện: nêu rõ quy mô công trình bệnh viện, các gói tư vấn/khảo sát/thiết kế đang triển khai và tiềm năng gói TBYT sắp tới.
    - Nếu là kế hoạch mua sắm thiết bị y tế / hệ thống PACS: liệt kê rõ từng mã gói/lô con (nếu có) và tên thiết bị / hệ thống PACS chính, hình thức & thời gian dự kiến LCNT.
@@ -915,7 +912,7 @@ def send_email_report(matched_list):
         <div style="font-family: Arial, sans-serif; padding: 20px;">
             <h2 style="color: #0275d8;">BÁO CÁO KẾ HOẠCH LỰA CHỌN NHÀ THẦU (KHLCNT)</h2>
             <p>Khung thời gian quét: từ <b>{START_TIME.strftime('%H:%M %d/%m/%Y')}</b> đến <b>{TODAY_STR}</b></p>
-            <p>Đã lọc phát hiện <b>{len(matched_list_sorted)}</b> KHLCNT (TBYT, PACS & Dự án xây mới/nâng cấp BV) thuộc 14 tỉnh/TP phụ trách:</p>
+            <p>Đã lọc phát hiện <b>{len(matched_list_sorted)}</b> KHLCNT (TBYT, Mua PACS & Dự án xây mới/nâng cấp BV) thuộc 14 tỉnh/TP phụ trách:</p>
             <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width: 100%; border-color: #ddd;">
                 <tr style="background-color: #e6f2ff;">
                     <th align="center">STT</th>
