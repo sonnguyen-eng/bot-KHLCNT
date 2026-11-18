@@ -48,7 +48,6 @@ SHEET_HEADERS_BY_TAB = {
     ] + SALES_WORKFLOW_HEADERS
 }
 
-# Độ rộng chuẩn (pixel) cho từng cột để hiển thị gọn trên cả máy tính và điện thoại
 COLUMN_WIDTHS_BY_TAB = {
     "YCCG": [155, 165, 130, 145, 220, 320, 135, 140, 135, 155, 340, 110, 140, 140, 130, 140, 140],
     "KHLCNT": [155, 130, 165, 130, 145, 220, 320, 145, 145, 140, 135, 155, 340, 110, 140, 140, 130, 140, 140],
@@ -77,24 +76,20 @@ def apply_sheet_layout_and_wrap(spreadsheet, ws, tab_name):
         col_widths = COLUMN_WIDTHS_BY_TAB.get(tab_name, [])
         num_cols = len(col_widths) or 18
 
-        # 1. Bật tự động xuống dòng (WRAP) và căn trên (TOP) cho toàn bộ ô dữ liệu
         ws.format(f"A1:{gspread.utils.rowcol_to_a1(2000, num_cols)}", {
             "wrapStrategy": "WRAP",
             "verticalAlignment": "TOP"
         })
 
-        # 2. Định dạng riêng hàng tiêu đề (dòng 1): In đậm, nền xanh nhạt, căn giữa
-        ws.format(f"1:1", {
+        ws.format("1:1", {
             "textFormat": {"bold": True},
             "backgroundColor": {"red": 0.88, "green": 0.94, "blue": 1.0},
             "verticalAlignment": "MIDDLE",
             "wrapStrategy": "WRAP"
         })
 
-        # 3. Cố định hàng 1 (tiêu đề) và cột A (Mã gói) để lướt trên điện thoại không bị mất dấu
         ws.freeze(rows=1, cols=1)
 
-        # 4. Cập nhật độ rộng từng cột qua batch_update
         requests = []
         for idx, width_px in enumerate(col_widths):
             requests.append({
@@ -192,7 +187,7 @@ def sync_data(source_type):
 
         stage = item.get("stage") or (
             "Tiền dự án (Thẩm định giá)" if "thẩm định giá" in str(item.get("matched_kw", "")).lower()
-            else ("Mời báo giá (YCCG)" if source_type == "YCCG" else source_type)
+            else ("Mời báo giá (YCBG)" if source_type == "YCCG" else source_type)
         )
         bu_group = item.get("bu_group") or "Chưa phân nhóm BU"
         province = item.get("province", "")
@@ -200,7 +195,9 @@ def sync_data(source_type):
         title = item.get("title", "")
         matched_kw = item.get("matched_kw", "")
         location = item.get("location", "")
-        reason = item.get("reason", "")
+        reason = str(item.get("reason") or "").strip()
+        auto_note = str(item.get("auto_note") or "").strip()
+        full_summary = f"{reason}\n[Note: {auto_note}]" if (auto_note and auto_note not in reason) else (reason or auto_note)
         link_cell = format_hyperlink(item.get("detail_url", ""))
 
         if source_type == "YCCG":
@@ -215,7 +212,7 @@ def sync_data(source_type):
                 matched_kw,
                 location,
                 bu_group,
-                reason,
+                full_summary,
                 link_cell
             ] + empty_sales_cols
 
@@ -233,7 +230,7 @@ def sync_data(source_type):
                 matched_kw,
                 location,
                 bu_group,
-                reason,
+                full_summary,
                 link_cell
             ] + empty_sales_cols
 
@@ -251,7 +248,7 @@ def sync_data(source_type):
                 matched_kw,
                 location,
                 bu_group,
-                reason,
+                full_summary,
                 link_cell
             ] + empty_sales_cols
 
