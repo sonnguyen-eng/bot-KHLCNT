@@ -1,20 +1,19 @@
-name: Auto Crawl KHLCNT
+name: Auto Crawl KHLCNT TBYT & Du An BV
 
 on:
   schedule:
-    # Chạy tự động lúc 06:15 sáng và 20:45 tối giờ Việt Nam (23:15 và 13:45 UTC)
-    - cron: '15 23 * * *'
-    - cron: '45 13 * * *'
+    # Chạy tự động lúc 06:00 sáng và 20:30 tối hàng ngày (giờ Việt Nam UTC+7)
+    - cron: '0 23 * * *'
+    - cron: '30 13 * * *'
   workflow_dispatch:
 
 permissions:
-  contents: read
   actions: read
+  contents: read
 
 jobs:
-  crawl-khlcnt:
+  crawl-and-sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -25,29 +24,22 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Google Chrome
-        uses: browser-actions/setup-chrome@v1
-        with:
-          chrome-version: stable
-
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install gspread google-auth google-genai selenium webdriver-manager
 
-      - name: Lấy mốc thời gian lần chạy tự động (schedule) thành công gần nhất
+      - name: Lấy mốc thời gian lần chạy tự động thành công gần nhất
         id: get_last_run
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          LAST_RUN=$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            "/repos/${{ github.repository }}/actions/workflows/auto_run.yml/runs?event=schedule&status=success&per_page=1" \
-            --jq '.workflow_runs[0].created_at // empty')
+          LAST_RUN=$(gh api "repos/${{ github.repository }}/actions/workflows/auto_run.yml/runs?event=schedule&status=success&per_page=1" --jq '.workflow_runs[0].created_at // empty')
           echo "last_run=$LAST_RUN" >> $GITHUB_OUTPUT
-          echo "Mốc lịch chạy tự động KHLCNT thành công gần nhất: $LAST_RUN"
+          echo "Mốc thời gian lần chạy trước: $LAST_RUN"
 
-      - name: Run Bot KHLCNT (Bước 1 - Quét & Phân tích AI)
+      - name: Chạy BOT KHLCNT (Quét, Lọc Trùng GSheet, Phân Tích AI & Gửi Email)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
@@ -55,10 +47,13 @@ jobs:
           RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
           LAST_RUN_TIMESTAMP: ${{ steps.get_last_run.outputs.last_run }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GSHEET_ID: ${{ secrets.GSHEET_ID }}
+          GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
         run: python main_bot.py
 
-      - name: Sync to Google Sheets (Bước 2 - Ghi dữ liệu mới không trùng)
+      - name: Đồng bộ dữ liệu mới lên Google Sheets
+        if: always()
         env:
           GSHEET_ID: ${{ secrets.GSHEET_ID }}
           GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
-        run: python sync_to_gsheet.py KHLCNT
+        run: python sync_to_gsheet.py
