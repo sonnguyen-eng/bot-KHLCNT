@@ -28,21 +28,24 @@ RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL", "").strip() or SENDER_EMAIL
 LAST_RUN_ENV = os.environ.get("LAST_RUN_TIMESTAMP", "").strip()
 EVENT_NAME_ENV = os.environ.get("GITHUB_EVENT_NAME", "").strip()
 
-# Nhóm 1: Từ khóa thiết bị y tế & giải pháp PACS đặc thù (khớp trực tiếp)
+# Nhóm 1: Từ khóa thiết bị y tế & giải pháp PACS đặc thù (Đầy đủ toàn bộ BU)
 SPECIFIC_DEVICE_KEYWORDS = [
     # Nội soi - Phẫu thuật - Laser
-    "nội soi", "ercp", "robot phẫu thuật", "tán sỏi laser", "máy tán sỏi",
+    "nội soi", "ống soi", "optic nội soi", "dụng cụ nội soi", "ercp",
+    "robot phẫu thuật", "tán sỏi laser", "máy tán sỏi", "dao mổ",
     # Phòng mổ - Gây mê - Hồi sức - Giường
-    "bàn mổ", "đèn mổ", "máy gây mê", "monitor theo dõi bệnh nhân",
-    "máy theo dõi bệnh nhân", "bơm tiêm điện", "máy truyền dịch",
+    "bàn mổ", "đèn mổ", "thiết bị phòng mổ", "máy gây mê",
+    "monitor theo dõi bệnh nhân", "máy theo dõi bệnh nhân",
+    "bơm tiêm điện", "máy truyền dịch",
     "giường icu", "giường cấp cứu", "giường đa năng", "giường bệnh",
     "hồi sức cấp cứu", "hồi sức sơ sinh", "máy thở", "máy phá rung tim",
     # Khí y tế - Vận chuyển - Tiệt trùng
     "hệ thống khí y tế", "bồn oxy lỏng", "oxy trung tâm", "vận chuyển mẫu",
-    "máy hấp tiệt trùng", "nhiệt độ thấp", "máy hấp ướt",
-    # Sản khoa - Chẩn đoán hình ảnh - PACS - Chuyên khoa
+    "máy hấp tiệt trùng", "nhiệt độ thấp", "máy hấp ướt", "nồi hấp",
+    # Sản khoa - Chẩn đoán hình ảnh - PACS - Thận nhân tạo
     "bàn khám sản", "monitor sản khoa", "c-arm", "c arm", "x-quang",
-    "máy siêu âm", "siêu âm màu", "siêu âm chẩn đoán", "thận nhân tạo",
+    "máy siêu âm", "siêu âm màu", "siêu âm chẩn đoán",
+    "thận nhân tạo", "máy chạy thận", "hdf online",
     "pacs", "ris/pacs", "ris - pacs", "lưu trữ và truyền tải hình ảnh",
     # Gói mua sắm / sửa chữa thiết bị y tế tổng thể
     "thiết bị y tế chuyên môn", "thiết bị y tế chuyên dùng",
@@ -54,7 +57,7 @@ SPECIFIC_DEVICE_KEYWORDS = [
 
 # Nhóm 2: Từ khóa có điều kiện (CHỈ khớp khi đi kèm đơn vị/công trình ngành Y tế)
 CONDITIONAL_KEYWORDS = [
-    "thẩm định giá", "chẩn đoán hình ảnh"
+    "thẩm định giá", "chẩn đoán hình ảnh", "phục vụ chuyên môn"
 ]
 
 # Thực thể / Công trình thuộc ngành Y tế
@@ -90,7 +93,7 @@ CONSUMABLE_MEDICAL_TERMS = [
     "phim x-quang", "phim chụp", "bơm, kim tiêm", "bơm kim tiêm",
     "dây truyền", "găng tay", "bông, dung dịch", "băng, gạc",
     "vật tư tiêu hao", "hóa chất xét nghiệm", "sinh phẩm",
-    "vật tư y tế sử dụng trong"
+    "vật tư y tế sử dụng trong", "vật tư dùng trong"
 ]
 
 # Cụm từ nhận diện gói THUÊ PACS / THUÊ THIẾT BỊ / THUÊ PHẦN MỀM (loại trừ tuyệt đối)
@@ -113,7 +116,7 @@ BROAD_QUERIES = [
 # 2. DANH SÁCH 14 TỈNH / THÀNH PHỐ MỤC TIÊU PHỤ TRÁCH
 # ==============================================================================
 LOCATION_ALIASES = {
-    "Thành phố Đà Nẵng": ["đà nẵng", "quảng nam", "tam kỳ", "hội an"],
+    "Thành phố Đà Nẵng": ["đà nẵng", "quảng nam", "tam kỳ", "hội an", "việt - hàn đà nẵng"],
     "Tỉnh Quảng Ngãi": ["quảng ngãi", "kon tum"],
     "Tỉnh Đắk Lắk": ["đắk lắk", "đắc lắc", "tây nguyên", "buôn ma thuột", "phú yên", "tuy hòa"],
     "Tỉnh Gia Lai": ["gia lai", "pleiku", "bình định", "quy nhơn"],
@@ -123,7 +126,8 @@ LOCATION_ALIASES = {
         "hồ chí minh", "tp.hcm", "tphcm", "tp hcm", "sài gòn", "thủ đức",
         "bình dương", "bà rịa", "vũng tàu", "phú mỹ", "nhi đồng", "bình dân",
         "viện tim", "nhân ái", "đại học y dược", "ung bướu", "gò vấp",
-        "bệnh nhiệt đới", "phạm ngọc thạch", "chấn thương", "lê văn thịnh", "thuận an"
+        "bệnh nhiệt đới", "phạm ngọc thạch", "chấn thương", "lê văn thịnh",
+        "thuận an", "tân uyên"
     ],
     "Thành phố Đồng Nai": ["đồng nai", "biên hòa", "long khánh", "bình phước", "đồng xoài", "long thành"],
     "Tỉnh Tây Ninh": ["tây ninh", "long an", "tân an", "thủ thừa", "tân hưng"],
@@ -143,9 +147,9 @@ if LAST_RUN_ENV:
         parsed_last_run = datetime.fromisoformat(LAST_RUN_ENV.replace("Z", "+00:00")).astimezone(TZ_VN)
         START_TIME = parsed_last_run - timedelta(minutes=15)
     except Exception:
-        START_TIME = NOW_VN - timedelta(hours=24)
+        START_TIME = NOW_VN - timedelta(hours=48)
 else:
-    START_TIME = NOW_VN - timedelta(hours=24)
+    START_TIME = NOW_VN - timedelta(hours=48)
 
 BASE_DOMAIN = "muasamcong.mof.gov.vn"
 PRIMARY_MODEL = "gemini-3.8-flash"
@@ -259,19 +263,21 @@ def format_currency(amount):
 
 def format_expected_bid_time(pkg):
     bid_time_str = str(pkg.get("bidTime") or "").strip()
-    if bid_time_str:
-        return bid_time_str
     unit = pkg.get("bidStartUnit", "")
     year = pkg.get("bidStartYear", "")
     quarter = pkg.get("bidStartQuarter", "")
     month = pkg.get("bidStartMonth", "")
+    period_str = ""
     if unit == "Q" and quarter and year:
-        return f"Quý {quarter}/{year}"
-    if unit == "M" and month and year:
-        return f"Tháng {month}/{year}"
-    if year:
-        return f"Năm {year}"
-    return "Chưa rõ thời gian"
+        period_str = f"Quý {quarter}/{year}"
+    elif unit == "M" and month and year:
+        period_str = f"Tháng {month}/{year}"
+    elif year:
+        period_str = f"Năm {year}"
+
+    if period_str and bid_time_str:
+        return f"{period_str} (TGTH: {bid_time_str})"
+    return period_str or bid_time_str or "Chưa rõ thời gian"
 
 # ==============================================================================
 # 5. KIỂM TRA & CHUẨN HÓA ĐỊA PHƯƠNG TRONG 14 TỈNH / THÀNH PHỐ MỤC TIÊU
@@ -304,7 +310,7 @@ def get_khlcnt_detail_values(driver, plan_id, token_val):
     var callback = arguments[arguments.length - 1];
     var planId = arguments[0];
     var token = arguments[1];
-    
+
     let url = '/o/egp-portal-contractor-selection-v2/services/expose/lcnt/bid-po-bidp-plan-project-view/get-by-id';
     if (token) {
         url += '?token=' + token;
@@ -316,9 +322,7 @@ def get_khlcnt_detail_values(driver, plan_id, token_val):
             'Content-Type': 'application/json',
             'Accept': 'application/json, text/plain, */*'
         },
-        body: JSON.stringify({
-            id: planId
-        })
+        body: JSON.stringify({ id: planId })
     })
     .then(response => response.json())
     .then(data => callback(data))
@@ -371,7 +375,6 @@ def get_latest_token_from_perf(driver):
     """
     return driver.execute_script(js_get_token) or ""
 
-
 def refresh_session_token(driver, kw_hint="y tế"):
     driver.execute_script("window.performance.clearResourceTimings();")
     try:
@@ -404,7 +407,6 @@ def is_consumable_package(text_lower):
 def is_rental_package(text_lower):
     if any(r in text_lower for r in RENTAL_TERMS):
         return True
-    # Bắt trường hợp "thuê 03 máy siêu âm", "thuê 2 máy..."
     if re.search(r"\bthuê\s+\d*\s*(máy|thiết bị|hệ thống)", text_lower):
         return True
     return False
@@ -415,13 +417,14 @@ def is_equipment_package(text_lower):
     if any(excl in text_lower for excl in EXCLUDE_NON_MEDICAL_PATTERNS):
         return False
     equipment_terms = [
-        "thiết bị y tế", "trang thiết bị y tế", "nội soi", "bàn mổ", "đèn mổ",
-        "gây mê", "hồi sức", "giường icu", "giường cấp cứu", "giường đa năng",
-        "giường bệnh", "máy x-quang", "hệ thống x-quang", "c-arm", "c arm",
+        "thiết bị y tế", "trang thiết bị y tế", "nội soi", "ống soi", "dụng cụ nội soi",
+        "bàn mổ", "đèn mổ", "thiết bị phòng mổ", "dao mổ", "gây mê", "hồi sức",
+        "giường icu", "giường cấp cứu", "giường đa năng", "giường bệnh",
+        "máy x-quang", "hệ thống x-quang", "c-arm", "c arm",
         "máy siêu âm", "máy thở", "tán sỏi", "khí y tế", "oxy lỏng", "oxy trung tâm",
-        "tiệt trùng", "monitor", "sơ sinh", "thận nhân tạo", "robot phẫu thuật",
-        "pacs", "ris/pacs", "lưu trữ và truyền tải hình ảnh", "sửa chữa thiết bị y tế",
-        "sửa chữa máy"
+        "tiệt trùng", "nồi hấp", "monitor", "sơ sinh", "thận nhân tạo", "máy chạy thận",
+        "robot phẫu thuật", "pacs", "ris/pacs", "lưu trữ và truyền tải hình ảnh",
+        "sửa chữa thiết bị y tế", "sửa chữa máy"
     ]
     return any(t in text_lower for t in equipment_terms)
 
@@ -443,9 +446,8 @@ def evaluate_medical_relevance(plan_name, investor, pkg_names_list, medical_pkg_
     if is_rental_package(content_text):
         return False, False, []
 
-    # 3. Nếu đã bóc tách được danh sách gói thầu con mà KHÔNG có gói thiết bị nào (chỉ toàn vật tư tiêu hao như bông băng, bơm kim tiêm, phim X-quang)
+    # 3. Nếu đã bóc tách được danh sách gói thầu con mà KHÔNG có gói thiết bị nào (chỉ toàn vật tư tiêu hao)
     if pkg_names_list and not medical_pkg_names:
-        # Chỉ giữ lại nếu đây là giai đoạn chuẩn bị đầu tư / xây mới / nâng cấp quy mô lớn bệnh viện
         has_medical_entity = any(ent in f"{plan_lower} {investor_lower}" for ent in MEDICAL_ENTITY_TERMS)
         is_major_hospital_proj = has_medical_entity and any(act in plan_lower for act in CONSTRUCTION_PROJECT_TERMS)
         if not is_major_hospital_proj:
@@ -464,7 +466,7 @@ def evaluate_medical_relevance(plan_name, investor, pkg_names_list, medical_pkg_
     # 4. Kiểm tra thực thể y tế
     has_medical_entity = any(ent in f"{plan_lower} {investor_lower}" for ent in MEDICAL_ENTITY_TERMS)
 
-    # 5. Kiểm tra từ khóa thiết bị y tế & mua đứt PACS đặc thù (ưu tiên trên các gói thiết bị sạch)
+    # 5. Kiểm tra từ khóa thiết bị y tế & mua đứt PACS đặc thù (ưu tiên trên các gói thiết bị sạch + generalTasks)
     clean_scope = " ".join(medical_pkg_names).lower() if medical_pkg_names else (content_text if pkgs_lower.strip() else raw_str)
     matched_specific = [k for k in SPECIFIC_DEVICE_KEYWORDS if k in clean_scope]
 
@@ -501,7 +503,7 @@ def evaluate_medical_relevance(plan_name, investor, pkg_names_list, medical_pkg_
 # 10. TRÍCH XUẤT KHLCNT 14 TỈNH/TP (TBYT + MUA PACS + DỰ ÁN CÔNG TRÌNH BV)
 # ==============================================================================
 def fetch_khlcnt_target_provinces(driver):
-    print(f"-> Chế độ chạy: {EVENT_NAME_ENV or 'local'} | Mốc lịch sử gốc: {LAST_RUN_ENV or 'Mặc định 24h'}")
+    print(f"-> Chế độ chạy: {EVENT_NAME_ENV or 'local'} | Mốc lịch sử gốc: {LAST_RUN_ENV or 'Mặc định 48h'}")
     print(f"-> Kết nối Session Mua Sắm Công KHLCNT - 14 Tỉnh/TP (Khung quét có đệm: {START_TIME.strftime('%H:%M %d/%m/%Y')} -> {TODAY_STR})...")
     driver.get(f"https://{BASE_DOMAIN}/web/guest/contractor-selection?render=index")
     time.sleep(9)
@@ -530,7 +532,7 @@ def fetch_khlcnt_target_provinces(driver):
     var fromDate = arguments[3];
     var toDate = arguments[4];
     var token = arguments[5];
-    
+
     let url = '/o/egp-portal-contractor-selection-v2/services/smart/search';
     if (token) {
         url += '?token=' + token;
@@ -576,7 +578,7 @@ def fetch_khlcnt_target_provinces(driver):
             }]
         }
     ];
-    
+
     fetch(url, {
         method: 'POST',
         headers: {
@@ -687,8 +689,9 @@ def fetch_khlcnt_target_provinces(driver):
                     if not is_published_in_time_window(item):
                         continue
 
-                    plan_no = str(item.get("planNo") or item.get("planNoStand") or "")
-                    plan_id = str(item.get("id") or "")
+                    plan_no = str(item.get("planNo") or item.get("planNoStand") or "").strip()
+                    plan_ver = str(item.get("planVersion") or "00").strip()
+                    plan_id = str(item.get("id") or "").strip()
                     if not plan_no or plan_no in unique_matches or plan_id in scanned_plan_ids:
                         continue
 
@@ -710,9 +713,11 @@ def fetch_khlcnt_target_provinces(driver):
                     province_in_kw += 1
 
                     decision_no = ""
+                    decision_file = ""
                     bid_packages_summary = []
                     all_pkg_names = []
                     medical_pkg_names = []
+                    general_tasks_list = []
                     medical_pkg_total = 0.0
                     expected_times = set()
 
@@ -720,10 +725,12 @@ def fetch_khlcnt_target_provinces(driver):
                         detail_json, detail_str = get_khlcnt_detail_values(driver, plan_id, token_val)
                         if detail_str:
                             raw_str += " " + detail_str
-                        
                         plan_view = detail_json.get("bidPoBidpPlanProjectDetailView") or {}
-                        decision_no = plan_view.get("decisionNo") or ""
-                        
+                        decision_no = str(plan_view.get("decisionNo") or "").strip()
+                        if plan_ver and plan_ver != "00":
+                            decision_no = f"{decision_no} (ĐC lần {plan_ver})".strip()
+                        decision_file = str(plan_view.get("decisionFileName") or "").strip()
+
                         pkg_list = detail_json.get("bidpPlanDetailToProjectList") or []
                         if isinstance(pkg_list, list):
                             for pkg in pkg_list:
@@ -731,25 +738,28 @@ def fetch_khlcnt_target_provinces(driver):
                                     continue
                                 b_no = str(pkg.get("bidNo") or pkg.get("code") or "").strip()
                                 b_name = str(pkg.get("bidName") or "").replace("\n", " ").strip()
+                                b_tasks = str(pkg.get("generalTasks") or "").replace("\n", " ").strip()
                                 b_num_price = parse_numeric_amount(pkg.get("bidPrice"))
                                 b_price = format_currency(b_num_price)
                                 b_form_code = pkg.get("bidForm") or ""
                                 b_form_text = BID_FORM_MAP.get(b_form_code, b_form_code)
                                 b_time_expected = format_expected_bid_time(pkg)
-                                
                                 if b_time_expected != "Chưa rõ thời gian":
                                     expected_times.add(b_time_expected)
-                                    
-                                if b_name:
-                                    all_pkg_names.append(b_name)
+
+                                combined_pkg_text = f"{b_name} {b_tasks}".strip()
+                                if combined_pkg_text:
+                                    all_pkg_names.append(combined_pkg_text)
                                     prefix_code = f"{b_no} - " if b_no else ""
+                                    task_note = f" | Tóm tắt công việc: {b_tasks}" if (b_tasks and b_tasks.lower() != b_name.lower()) else ""
                                     bid_packages_summary.append(
-                                        f"{prefix_code}{b_name} ({b_price} | {b_form_text} | Dự kiến: {b_time_expected})"
+                                        f"{prefix_code}{b_name}{task_note} ({b_price} | {b_form_text} | Dự kiến: {b_time_expected})"
                                     )
-                                    b_lower = b_name.lower()
-                                    if is_equipment_package(b_lower):
-                                        medical_pkg_names.append(f"{prefix_code}{b_name}")
+                                    if is_equipment_package(combined_pkg_text.lower()):
+                                        medical_pkg_names.append(f"{prefix_code}{combined_pkg_text}")
                                         medical_pkg_total += b_num_price
+                                        if b_tasks:
+                                            general_tasks_list.append(b_tasks)
 
                     is_relevant, is_hospital_proj, kw_tags = evaluate_medical_relevance(
                         plan_name, investor, all_pkg_names, medical_pkg_names, raw_str
@@ -769,20 +779,22 @@ def fetch_khlcnt_target_provinces(driver):
                             display_price = invest_total if invest_total != "Chưa cập nhật" else format_currency(medical_pkg_total)
                             stage_label = "Tiền dự án (Chuẩn bị đầu tư / Xây mới BV)"
                         else:
-                            display_title = " ; ".join(medical_pkg_names) if medical_pkg_names else plan_name
+                            display_title = "; ".join(medical_pkg_names) if medical_pkg_names else plan_name
                             display_price = format_currency(medical_pkg_total) if medical_pkg_total > 0 else invest_total
                             stage_label = "KHLCNT (Kế hoạch được duyệt)"
 
                         has_generic_pkg = any(
                             any(g in p.lower() for g in ["cung cấp, lắp đặt thiết bị y tế", "cung cấp lắp đặt thiết bị y tế", "mua sắm thiết bị y tế"])
-                            and not any(sp in p.lower() for sp in ["nội soi", "x-quang", "siêu âm", "máy thở", "bàn mổ", "tán sỏi", "sơ sinh", "thận nhân tạo", "pacs"])
+                            and not any(sp in p.lower() for sp in ["nội soi", "x-quang", "siêu âm", "máy thở", "bàn mổ", "tán sỏi", "sơ sinh", "thận nhân tạo", "pacs", "dao mổ"])
                             for p in (medical_pkg_names or [plan_name])
                         )
 
                         if is_early_prep:
                             auto_note = "Giai đoạn chuẩn bị đầu tư / xây mới công trình BV - Theo dõi sát khâu lập danh mục TBYT"
                         elif has_generic_pkg:
-                            auto_note = "Đang thực hiện xây danh mục, cấu hình thiết bị"
+                            auto_note = f"Gói thiết bị tổng hợp (chưa tách tên máy trên KHLCNT - File QĐ: {decision_file})" if decision_file else "Đang thực hiện xây danh mục, cấu hình thiết bị"
+                        elif general_tasks_list:
+                            auto_note = "Chi tiết danh mục máy trên KHLCNT: " + "; ".join(general_tasks_list[:3])
                         else:
                             auto_note = ""
 
@@ -790,8 +802,9 @@ def fetch_khlcnt_target_provinces(driver):
                         location_detail = (
                             "Tên KHLCNT"
                             if (any(k.lower() in header_text for k in kw_tags) or is_hospital_proj)
-                            else "Danh mục Gói thầu chi tiết"
+                            else "Danh mục Gói thầu / Tóm tắt công việc"
                         )
+
                         unique_matches[plan_no] = {
                             "code": plan_no,
                             "decision_no": decision_no,
@@ -858,7 +871,7 @@ Yêu cầu BẮT BUỘC:
      + Gói sửa chữa nhỏ/duy tu cơ sở hạ tầng bệnh viện (ốp gạch, sơn tường, chống thấm, lợp mái).
 3. Trong trường "reason", trình bày ngắn gọn, rõ ràng:
    - Nếu là dự án xây mới / nâng cấp / giai đoạn chuẩn bị đầu tư bệnh viện: nêu rõ quy mô công trình bệnh viện, các gói tư vấn/khảo sát/thiết kế đang triển khai và tiềm năng gói TBYT sắp tới.
-   - Nếu là kế hoạch mua sắm/sửa chữa thiết bị y tế / hệ thống PACS: liệt kê rõ từng mã gói/lô con (nếu có) và tên thiết bị / hệ thống PACS chính, hình thức & thời gian dự kiến LCNT.
+   - Nếu là kế hoạch mua sắm/sửa chữa thiết bị y tế / hệ thống PACS: liệt kê rõ từng mã gói/lô con, tên thiết bị / hệ thống PACS chi tiết (lấy từ bid_packages / tóm tắt công việc), hình thức & thời gian dự kiến LCNT.
 4. Nếu chưa có trường "stage", ghi "KHLCNT (Kế hoạch được duyệt)".
 5. Thêm trường "bu_group": phân loại vào 1 trong các nhóm [Dự án Xây mới / Nâng cấp BV, Nội soi - Tiêu hóa, Phòng mổ - Gây mê, Hồi sức - Giường bệnh, Tiệt trùng, Khí y tế, Chẩn đoán hình ảnh, Đa chuyên khoa / TBYT tổng hợp].
 6. Trả về đúng mảng JSON thuần túy (không kèm markdown).
@@ -969,16 +982,16 @@ def send_email_report(matched_list):
             province = item.get("province", "Theo dõi")
             location = item.get("location", "Danh mục Gói thầu chi tiết")
             auto_note = item.get("auto_note", "")
-            reason = item.get("reason") or (" ; ".join(item.get("bid_packages", [])[:5]) or "Khớp tiêu chí theo dõi y tế")
+            reason = item.get("reason") or ("; ".join(item.get("bid_packages", [])[:5]) or "Khớp tiêu chí theo dõi y tế")
             if auto_note and auto_note not in reason:
                 reason += f"<br><b style='color:#d9534f;'>Note: {auto_note}</b>"
             matched_kw = item.get("matched_kw", "")
             detail_url = item.get("detail_url") or f"https://{BASE_DOMAIN}/web/guest/contractor-selection?render=index"
-            
+
             code_block = f"<b>{code}</b><br><small style='color: #666;'>Đăng: {public_date}</small>"
             if decision_no:
                 code_block += f"<br><small style='color: #0275d8;'>QĐ: {decision_no}</small>"
-            code_block += f"<br><span style='font-size:11px; color:#2e7d32; font-weight:bold;'>[{stage}]</span>"
+            code_block += f"<br><span style='font-size:11px; color: #2e7d32; font-weight:bold;'>[{stage}]</span>"
 
             rows += f"""
             <tr>
@@ -995,7 +1008,7 @@ def send_email_report(matched_list):
                 <td align="center"><a href="{detail_url}" target="_blank" style="color: #0275d8; font-weight: bold;">Xem ngay</a></td>
             </tr>
             """
-            
+
         html_body = f"""
         <div style="font-family: Arial, sans-serif; padding: 20px;">
             <h2 style="color: #0275d8;">BÁO CÁO KẾ HOẠCH LỰA CHỌN NHÀ THẦU (KHLCNT)</h2>
@@ -1009,7 +1022,7 @@ def send_email_report(matched_list):
                     <th align="center">Giá Trị</th>
                     <th align="center">Dự Kiến LCNT</th>
                     <th>Chủ Đầu Tư</th>
-                    <th align="center">Tỉnh / TP</th>
+                    <th align="center">Tỉnh/TP</th>
                     <th align="center">Tiêu Chí Khớp</th>
                     <th align="center">Vị Trí Khớp</th>
                     <th>Phân Tích Chi Tiết</th>
