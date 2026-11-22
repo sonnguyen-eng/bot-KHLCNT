@@ -843,18 +843,89 @@ def fetch_khlcnt_target_provinces(driver):
     return list(unique_matches.values())
 
 # ==============================================================================
-# 11. PHÂN TÍCH KHLCNT VỚI GEMINI AI & HẬU KIỂM LOẠI BỎ GÓI RÁC
+# 11. TỰ ĐỘNG DÒ TÌM MODEL GEMINI MỚI NHẤT & PHÂN TÍCH DỮ LIỆU
 # ==============================================================================
+_CACHED_GEMINI_MODELS = None
+
+def get_prioritized_gemini_models(client):
+    """Tự động gọi API list models của Google, lọc dòng Flash/Pro hỗ trợ generateContent
+    và sắp xếp từ phiên bản mới nhất đến cũ nhất."""
+    global _CACHED_GEMINI_MODELS
+    if _CACHED_GEMINI_MODELS:
+        return _CACHED_GEMINI_MODELS
+
+    default_fallback = [
+        PRIMARY_MODEL,
+        FALLBACK_MODEL,
+        "gemini-3.5-flash",
+        "gemini-2.5-flash",
+        "gemini-3.1-pro-preview"
+    ]
+
+    try:
+        flash_candidates = []
+        pro_candidates = []
+
+        for m in client.models.list():
+            raw_name = getattr(m, "name", "") or ""
+            model_id = raw_name.replace("models/", "").strip()
+            supported = getattr(m, "supported_actions", []) or []
+
+            # Bỏ qua model không hỗ trợ sinh văn bản hoặc các bản chuyên biệt
+            if supported and "generateContent" not in supported:
+                continue
+            if any(x in model_id.lower() for x in ["embedding", "imagen", "veo", "tts", "audio", "live", "robotics", "computer-use"]):
+                continue
+
+            # Trích xuất số phiên bản (ví dụ: gemini-3.8-flash -> (3, 8))
+            ver_match = re.search(r"gemini-(\d+)(?:\.(\d+))?", model_id.lower())
+            if not ver_match:
+                continue
+
+            major = int(ver_match.group(1))
+            minor = int(ver_match.group(2) or 0)
+            is_stable = 0 if "preview" in model_id.lower() or "exp" in model_id.lower() else 1
+            is_lite = 0 if "lite" in model_id.lower() else 1
+
+            # Điểm ưu tiên: Phiên bản cao nhất -> Bản chính thức trước bản preview -> Bản thường trước bản lite
+            score = (major, minor, is_stable, is_lite)
+
+            if "flash" in model_id.lower():
+                flash_candidates.append((score, model_id))
+            elif "pro" in model_id.lower():
+                pro_candidates.append((score, model_id))
+
+        # Sắp xếp giảm dần từ mới nhất -> cũ nhất
+        flash_candidates.sort(key=lambda x: x[0], reverse=True)
+        pro_candidates.sort(key=lambda x: x[0], reverse=True)
+
+        ordered_models = []
+        for _, m_id in flash_candidates[:4] + pro_candidates[:2]:
+            if m_id not in ordered_models:
+                ordered_models.append(m_id)
+
+        if ordered_models:
+            _CACHED_GEMINI_MODELS = ordered_models
+            print(f"-> Danh sách Model Gemini tự động xếp hạng (Mới -> Cũ): {ordered_models}")
+            return ordered_models
+    except Exception as e:
+        print(f"[CẢNH BÁO LẤY DANH SÁCH MODEL GEMINI] {e} -> Dùng danh sách dự phòng.")
+
+    _CACHED_GEMINI_MODELS = list(dict.fromkeys(default_fallback))
+    return _CACHED_GEMINI_MODELS
+
+
 def analyze_batch_with_gemini(batch_items):
     global current_key_index, GEMINI_API_KEYS
     from google import genai
     from google.genai import types
 
-    models_to_try = [
-        PRIMARY_MODEL,
-        FALLBACK_MODEL,
-        "gemini-3.1-pro-preview"
-    ]
+    if not GEMINI_API_KEYS:
+        return batch_items
+
+    # Dùng key hiện tại để dò danh sách model mới nhất trên hệ thống Google
+    init_client = genai.Client(api_key=GEMINI_API_KEYS[current_key_index])
+    models_to_try = get_prioritized_gemini_models(init_client)
 
     prompt = f"""
 Bạn là chuyên gia thẩm định dữ liệu Kế hoạch lựa chọn nhà thầu (KHLCNT) Trang thiết bị Y tế, Hệ thống PACS (chỉ mua đứt/đầu tư, KHÔNG lấy gói thuê) và Dự án đầu tư xây dựng/nâng cấp Bệnh viện.
@@ -880,7 +951,8 @@ Danh sách:
 {json.dumps(batch_items, ensure_ascii=False, indent=2)}
 """
 
-    retry_delays = [8, 15, 25]
+    # Chỉ thử lại 1 lần ngắn (5s) khi gặp 503 để chuyển nhanh sang model kế tiếp
+    retry_delays = [5]
 
     for model_name in models_to_try:
         key_idx = current_key_index
@@ -888,7 +960,7 @@ Danh sách:
             key = GEMINI_API_KEYS[key_idx]
             client = genai.Client(api_key=key)
 
-            for attempt in range(len(retry_delays)):
+            for attempt in range(len(retry_delays) + 1):
                 try:
                     response = client.models.generate_content(
                         model=model_name,
@@ -915,11 +987,12 @@ Danh sách:
                         break
 
                     if "503" in error_msg or "unavailable" in error_msg.lower():
-                        if attempt < len(retry_delays) - 1:
+                        if attempt < len(retry_delays):
                             wait_sec = retry_delays[attempt]
-                            print(f"⏳ Model {model_name} đang quá tải (503), thử lại lần {attempt + 2} sau {wait_sec}s...")
+                            print(f"⏳ Model {model_name} đang quá tải (503), thử lại sau {wait_sec}s...")
                             time.sleep(wait_sec)
                             continue
+                        print(f"↪️ Model {model_name} tiếp tục quá tải (503), chuyển sang model dự phòng kế tiếp...")
                         key_idx = len(GEMINI_API_KEYS)
                         break
 
@@ -927,6 +1000,7 @@ Danh sách:
                     break
 
     return batch_items
+
 
 def analyze_with_gemini(candidates):
     if not candidates or not GEMINI_API_KEYS:
